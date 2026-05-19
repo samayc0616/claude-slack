@@ -522,10 +522,32 @@ class Daemon:
         return self.sessions.get(thread_ts)
 
     async def start(self) -> None:
+        await self._ensure_welcome_pinned()
         handler = AsyncSocketModeHandler(self.app, self.cfg.slack.app_token)
         log.info("claude-slack daemon starting; default channel=%s cwd=%s",
                  self.cfg.slack.channel_id, self.cfg.claude.default_cwd)
         await handler.start_async()
+
+    async def _ensure_welcome_pinned(self) -> None:
+        """Post + pin a usage message in the default channel, once."""
+        channel = self.cfg.slack.channel_id
+        if not channel:
+            return
+        try:
+            me = await self.web.auth_test()
+            bot_user = me.get("user_id", "")
+            bot_name = me.get("user", "claude")
+            pins = await self.web.pins_list(channel=channel)
+            for item in pins.get("items", []):
+                msg = item.get("message") or {}
+                if msg.get("user") == bot_user and "_welcome_marker_" in (msg.get("text") or ""):
+                    return  # already pinned
+            blocks, fallback = _welcome_blocks(bot_name)
+            resp = await self.web.chat_postMessage(channel=channel, blocks=blocks, text=fallback)
+            await self.web.pins_add(channel=channel, timestamp=resp["ts"])
+            log.info("posted + pinned welcome message in %s", channel)
+        except Exception as e:
+            log.warning("welcome pin skipped: %s", e)
 
 
 def _strip_mentions(text: str) -> str:
@@ -537,6 +559,44 @@ def _autolabel(prompt: str) -> str:
     line = prompt.strip().splitlines()[0] if prompt.strip() else ""
     line = re.sub(r"\s+", " ", line)
     return line[:60].rstrip(".:,;-")
+
+
+def _welcome_blocks(bot_name: str) -> tuple[list[dict], str]:
+    """Pinned welcome message. The _welcome_marker_ token lets us detect it on restart."""
+    at = f"@{bot_name}"
+    text = (
+        f":wave: *Welcome to {at}* — here's how to use it.  _welcome_marker_\n\n"
+        f"*Start a session*\n"
+        f"• `{at} <prompt>` in any channel I'm in — opens a thread, new session lives there\n"
+        f"• `/claude new <prompt>` — same thing via slash command\n"
+        f"• DM me — first message starts a session\n\n"
+        f"*Continue a session*\n"
+        f"• Just reply in the thread. No `{at}` needed.\n\n"
+        f"*While I'm working*\n"
+        f"• Reply with extra context — I react :eyes:, queue it, and auto-feed it on the next turn\n"
+        f"• Drop a file in the thread — I stage it and tell Claude its path\n"
+        f"• React :no_entry: on any of my messages — kills the session\n"
+        f"• React :repeat: — replays your last prompt\n\n"
+        f"*When I need your input*\n"
+        f"• Status flips to :raised_hand: and I DM you with a link back to the thread\n"
+        f"• `AskUserQuestion` shows radio / checkbox blocks; pick and hit *Submit*\n"
+        f"• `ExitPlanMode` shows the plan with *Approve* / *Reject* buttons\n\n"
+        f"*Slash commands*\n"
+        f"• `/claude list` — all known sessions with status + cost\n"
+        f"• `/claude new <prompt>` — start a session in a new thread\n"
+        f"• `/claude kill <thread_ts>` — force shutdown\n\n"
+        f"*Session card* pinned at each thread top: cwd, session id, cost.\n"
+        f"Two buttons: *Interrupt* (Ctrl-C to Claude) and *Resend last* (replay last prompt)."
+    )
+    blocks = [
+        {"type": "section",
+         "text": {"type": "mrkdwn", "text": text}},
+        {"type": "context",
+         "elements": [{"type": "mrkdwn",
+                       "text": "Bridge running locally on the user's workstation. "
+                               "Source: <https://github.com/samayc0616/claude-slack|claude-slack>."}]},
+    ]
+    return blocks, f"How to use {at}"
 
 
 def run() -> int:
