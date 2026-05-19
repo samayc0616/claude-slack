@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.venv/
+.uv-cache/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# config + state are user-local, never commit
+config.toml
+sessions.json
+*.log
+.env
