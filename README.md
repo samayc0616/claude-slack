@@ -76,9 +76,35 @@ export CLAUDE_SLACK_ROUTER_URL=ws://your-router-host:9000/v1/connect
 uv run claude-slack mirror
 ```
 
-The first run prompts them once for an API key. To get one, they type `/claude register` in Slack — the bot DMs them their personal `cs_…` key. They paste it back into the prompt. The shim saves to `~/.config/claude-slack/config.toml` and connects.
+The first run drops you into a polished setup TUI:
+
+```
+╭─ claude-slack mirror · first-time setup ─────────────────────╮
+│  Router: ws://strata6:9000/v1/connect                        │
+╰──────────────────────────────────────────────────────────────╯
+
+── Step 1 of 2  get your API key from Slack ──
+  In any Slack channel or DM, type:
+    /claude register
+
+  The Claude Code Companion bot will DM you a key that starts with cs_…
+  Also: a pinned message in that DM explains how to use the bot.
+
+── Step 2 of 2  paste the key here ──
+  API key (cs_...): _
+```
+
+Switch to Slack, type `/claude register`, the bot DMs your key + pins a usage guide to that DM. Paste the `cs_…` value back into the terminal. Done forever — config is saved to `~/.config/claude-slack/config.toml`.
 
 Subsequent runs: just `claude-slack mirror` (or `alias claude='claude-slack mirror'`).
+
+### Same machine as the router (e.g. strata users)
+
+It's totally fine for users to run their shim on the same machine as the router (e.g. multiple strata users on strata6 itself). The configs don't collide:
+- Router config: `~/.config/claude-slack-router/`
+- User shim config: `~/.config/claude-slack/`
+
+Each user has their own home directory and therefore their own config. They use the same router URL as anyone else (`ws://strata6:9000/v1/connect`) — the connection just stays on the local loopback.
 
 ## Daily use
 
@@ -99,9 +125,21 @@ In Slack, they DM the `@claude` bot. Every assistant message, tool call, and the
 
 | Command | What it does |
 |---|---|
-| `/claude register` | Generates a new API key, DMs it to you, rotates any prior key |
+| `/claude register` | Generates a new API key, DMs it to you, also pins a usage guide in that DM. Rotates any prior key. |
 | `/claude revoke` | Removes your key + disconnects any active shim |
 | `/claude status` | Shows whether your shim is connected, key age, queued events |
+
+### What gets pinned in your DM with the bot
+
+The first time you `/claude register`, the bot pins a permanent usage guide to your DM. It covers:
+
+- The exact command to run on your workstation
+- How each `claude-slack mirror` run shows up (one thread per session)
+- How to remote-control: reply in threads to inject prompts, `:no_entry:` to SIGINT
+- All slash commands
+- Troubleshooting (status checks, env-var verification, key rotation)
+
+This guide is pinned so you can always scroll up to find it. The bot also greets unregistered users who DM it with a quick onboarding hint.
 
 ## Privacy model
 

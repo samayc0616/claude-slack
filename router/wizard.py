@@ -54,6 +54,8 @@ def _manifest(display_name: str = "claude") -> dict:
                     "im:history",
                     "im:read",
                     "im:write",
+                    "pins:read",
+                    "pins:write",
                     "reactions:read",
                     "reactions:write",
                     "users:read",

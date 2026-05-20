@@ -48,6 +48,7 @@ class Router:
 
         self._shims: dict[str, ShimConn] = {}       # slack_user_id → ShimConn
         self._dm_to_user: dict[str, str] = {}       # DM channel → slack_user_id (cache)
+        self._greeted: set[str] = set()             # user_ids we've already greeted in DM
 
         self._register_slack_handlers()
 
@@ -66,8 +67,28 @@ class Router:
         if event.get("bot_id"):
             return
         channel = event.get("channel", "")
+        sender = event.get("user", "")
         user = await self._user_for_dm(channel)
         if not user:
+            # Unregistered sender. One-time onboarding hint so they know what to do.
+            if sender and sender not in self._greeted:
+                self._greeted.add(sender)
+                router_url = self.cfg.server.public_url or f"ws://<router-host>:{self.cfg.server.port}/v1/connect"
+                try:
+                    await self.web.chat_postMessage(
+                        channel=channel,
+                        text=(
+                            ":wave: Hi! I'm Claude Code Companion. To use me, register first.\n\n"
+                            "1. Type `/claude register` in any channel — I'll DM you a key.\n"
+                            "2. On your workstation, in your shell:\n"
+                            f"   `export CLAUDE_SLACK_ROUTER_URL={router_url}`\n"
+                            "3. Run `claude-slack mirror`. Paste the key when prompted.\n\n"
+                            "After that, this DM mirrors your local claude session. "
+                            "Reply in any of my threads to send a prompt back into it."
+                        ),
+                    )
+                except Exception:
+                    pass
             return
         await self._deliver(user.slack_user_id, event)
 
@@ -114,31 +135,80 @@ class Router:
         self.audit.write("register", user=user_id, name=user_name, rotated=existed)
 
         url = self.cfg.server.public_url or f"ws://<router-host>:{self.cfg.server.port}/v1/connect"
-        snippet = (
+        key_msg = (
             ":key: *Your claude-slack API key*  "
             f"({'rotated — old key no longer works' if existed else 'new'})\n\n"
-            "Paste this into `~/.config/claude-slack/config.toml`:\n"
+            "When `claude-slack mirror` prompts you, paste just the key:\n"
+            f"```\n{key}\n```\n"
+            "Or paste the full block into `~/.config/claude-slack/config.toml`:\n"
             "```\n"
             "[router]\n"
             f"url = \"{url}\"\n"
             f"api_key = \"{key}\"\n"
             "```\n"
             ":warning: This is the only time you'll see this key. "
-            "If you lose it, run `/claude register` again to rotate.\n\n"
-            "Or, when `claude-slack mirror` prompts you, paste just the api_key value: "
-            f"`{key}`"
+            "If you lose it, run `/claude register` again to rotate."
         )
         try:
             dm = await self.web.conversations_open(users=user_id)
             ch = (dm.get("channel") or {}).get("id", "")
             if ch:
-                await self.web.chat_postMessage(channel=ch, text=snippet)
-                await respond(text=":mailbox_with_mail: I just DM'd you your API key.")
+                await self.web.chat_postMessage(channel=ch, text=key_msg)
+                # Pin a usage guide once per DM, separate from the (rotatable) key message.
+                await self._ensure_pinned_welcome(ch, url)
+                await respond(text=":mailbox_with_mail: I just DM'd you your API key. "
+                                    "Check the pinned message in our DM for usage.")
                 return
         except Exception as e:
             log.warning("DM failed for %s: %s", user_id, e)
         # Fallback: ephemeral reply with the key (less private but recoverable).
-        await respond(text=f"I couldn't DM you. Here's your key (ephemeral):\n{snippet}")
+        await respond(text=f"I couldn't DM you. Here's your key (ephemeral):\n{key_msg}")
+
+    async def _ensure_pinned_welcome(self, channel: str, router_url: str) -> None:
+        """Post + pin a usage guide once per DM, idempotent via hidden marker."""
+        marker = "_claude_slack_welcome_v1_"
+        try:
+            existing = await self.web.pins_list(channel=channel)
+            for item in (existing.get("items") or []):
+                msg = item.get("message") or {}
+                if marker in (msg.get("text") or ""):
+                    return
+        except Exception:
+            pass
+
+        guide = (
+            f":wave: *Welcome to Claude Code Companion* {marker}\n"
+            "This DM mirrors your local Claude Code session in real time. "
+            "Everything below explains how to use me.\n\n"
+            "*Run on your workstation*\n"
+            "```\n"
+            f"export CLAUDE_SLACK_ROUTER_URL={router_url}\n"
+            "claude-slack mirror\n"
+            "```\n"
+            "Or alias for everyday use: `alias claude='claude-slack mirror'`\n\n"
+            "*How a session shows up*\n"
+            "• Each `claude-slack mirror` run posts a new thread in this DM\n"
+            "• Every assistant message and tool call appears in that thread\n"
+            "• Your terminal works as normal — your keystrokes still drive claude\n\n"
+            "*Remote control me from Slack*\n"
+            "• Reply in any of my threads → your text is injected into claude's stdin\n"
+            "• React :no_entry: on any of my messages → SIGINT (Ctrl-C) to your local claude\n"
+            "• You can be on your phone / another machine / anywhere with Slack — same effect\n\n"
+            "*Slash commands*\n"
+            "• `/claude register` — rotate your API key (old one immediately invalidated)\n"
+            "• `/claude revoke` — disconnect and remove your key\n"
+            "• `/claude status` — is my shim connected? key age? queued events?\n\n"
+            "*Troubleshooting*\n"
+            "• Nothing happening? Run `/claude status` here — if not connected, your shim isn't dialed in\n"
+            "• Mirror won't start? Check `CLAUDE_SLACK_ROUTER_URL` is set in your shell\n"
+            "• Lost your key? `/claude register` makes a new one\n"
+            "• Need to stop entirely? Ctrl-C in the terminal running `claude-slack mirror`"
+        )
+        try:
+            resp = await self.web.chat_postMessage(channel=channel, text=guide)
+            await self.web.pins_add(channel=channel, timestamp=resp["ts"])
+        except Exception as e:
+            log.debug("welcome pin skipped: %s", e)
 
     async def _cmd_revoke(self, user_id: str, respond) -> None:
         if not self.users.revoke(user_id):

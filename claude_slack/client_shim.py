@@ -249,40 +249,73 @@ def _bootstrap_config():
     """Resolve router URL + api_key. URL can come from env var or config; key is
     interactively prompted on first launch when missing."""
     from .config import load, save
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.rule import Rule
 
+    console = Console()
     cfg = load()
     env_url = os.environ.get("CLAUDE_SLACK_ROUTER_URL", "").strip()
     if env_url and not cfg.router.url:
         cfg.router.url = env_url
 
     if not cfg.router.url:
-        sys.stderr.write(
-            "claude-slack mirror: router URL not set.\n"
-            "  Either: set CLAUDE_SLACK_ROUTER_URL=wss://router.example.com/v1/connect\n"
-            "  Or:     run `claude-slack init --client`\n"
-        )
+        console.print(Panel.fit(
+            "[bold red]claude-slack mirror: not configured.[/bold red]\n\n"
+            "  Set the router URL:\n"
+            "  [bold cyan]export CLAUDE_SLACK_ROUTER_URL=ws://<router-host>:9000/v1/connect[/bold cyan]\n\n"
+            "  Then re-run [bold]claude-slack mirror[/bold].\n"
+            "  Ask your admin for the router host if you don't know it.",
+            border_style="red",
+        ))
         return None
 
     if not cfg.router.api_key:
-        print()
-        print("\033[1mFirst-time setup\033[0m")
-        print(f"  Router: \033[36m{cfg.router.url}\033[0m")
-        print()
-        print("  In Slack, DM @claude or type:  \033[1m/claude register\033[0m")
-        print("  The bot will DM you your API key (one-time).")
-        print()
+        console.print()
+        console.print(Panel.fit(
+            "[bold cyan]claude-slack mirror · first-time setup[/bold cyan]\n\n"
+            "Welcome! This is a 30-second one-time setup. After this you just run\n"
+            "[bold]claude-slack mirror[/bold] (or alias it to [bold]claude[/bold]) and forget about it.\n\n"
+            f"[dim]Router:[/dim] [bold]{cfg.router.url}[/bold]",
+            border_style="cyan",
+        ))
+        console.print()
+        console.print(Rule("[bold cyan]Step 1 of 2[/bold cyan]  get your API key from Slack", style="cyan"))
+        console.print()
+        console.print("  In any Slack channel or DM, type:")
+        console.print("    [bold green]/claude register[/bold green]")
+        console.print()
+        console.print("  The [bold]Claude Code Companion[/bold] bot will DM you a key that starts with"
+                       " [bold]cs_…[/bold]")
+        console.print("  Also: a pinned message in that DM explains how to use the bot.")
+        console.print()
+        console.print(Rule("[bold cyan]Step 2 of 2[/bold cyan]  paste the key here", style="cyan"))
+        console.print()
+        console.print("  [dim]Copy just the cs_… value (not the whole [router] block).[/dim]")
+        console.print("  [dim]Your input will be hidden as you paste.[/dim]")
+        console.print()
         try:
-            key = input("  Paste API key (cs_…): ").strip()
+            import getpass
+            key = getpass.getpass("  API key (cs_...): ").strip()
         except (EOFError, KeyboardInterrupt):
-            sys.stderr.write("\nAborted.\n")
+            console.print("\n[yellow]Aborted.[/yellow]")
             return None
         if not key.startswith("cs_"):
-            sys.stderr.write("That doesn't look like an API key (should start with cs_). Aborting.\n")
+            console.print("\n[bold red]That doesn't look like an API key (should start with cs_).[/bold red]")
+            console.print("[dim]Make sure you copied just the key, not the surrounding `api_key = \"…\"` text.[/dim]")
             return None
         cfg.router.api_key = key
         save(cfg)
-        print(f"\033[32m  Saved to ~/.config/claude-slack/config.toml. Connecting…\033[0m")
-        print()
+        console.print()
+        console.print(Panel.fit(
+            "[bold green]Saved.[/bold green] Configuration is at "
+            "[bold]~/.config/claude-slack/config.toml[/bold]\n\n"
+            "[dim]Connecting to router and launching claude…[/dim]\n\n"
+            "[dim]Tip: open your DM with the Claude Code Companion bot in Slack "
+            "to watch this session mirror in real time.[/dim]",
+            border_style="green",
+        ))
+        console.print()
 
     return cfg
 
