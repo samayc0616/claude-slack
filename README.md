@@ -1,104 +1,145 @@
 # claude-slack
 
-Claude Code's Remote Control feature, rebuilt with Slack as the transport. Run `claude` in your terminal as normal — every assistant message, tool call, and your prompts get mirrored into a Slack DM. Type in Slack from your phone or another machine; that text becomes claude's next prompt as if you'd typed it yourself.
+Claude Code's Remote Control feature, rebuilt with Slack as the transport. Run `claude` in your terminal as normal — every assistant message, tool call, and your prompts get mirrored into a private Slack DM with the bot. Type in Slack from your phone or another machine; that text becomes claude's next prompt as if you'd typed it yourself.
 
-Built to sidestep org-disabled Remote Control. Your local `claude` binary keeps running locally and stays on whatever version Anthropic ships you. The shim is a thin pipe.
+**One shared bot for the team. The router runs on the admin's machine and demultiplexes Slack events to each teammate's local mirror.** Each user's DM with the bot is private (Slack-enforced). Each user's prompts and Claude responses execute on their own machine.
 
 ## How it works
 
 ```
-       your keyboard ───┐                  ┌─── your terminal (verbatim)
-                        ▼                  │
-                 ┌──────────────────────────────┐
-                 │  claude-slack mirror (shim)  │
-                 │  spawns the real `claude`    │
-                 │  in a PTY and forwards I/O   │
-                 └─────────┬────────────────────┘
-                           │
-                  ┌────────▼─────────┐
-                  │   real claude    │  ← the actual Anthropic binary,
-                  │   binary (any    │     updates via your normal channel
-                  │   version)       │
-                  └────────┬─────────┘
-                           │
-                  ANSI-stripped output
-                           │
-                           ▼
-                   private DM thread
-                   between you and
-                   the Slack bot
-                           ▲
-                           │
-                  Slack messages are
-                  injected into claude's
-                  stdin as if typed
+                    ┌─────────┐
+                    │  Slack  │
+                    └────┬────┘
+                         │ single socket-mode connection
+                         ▼
+              ┌──────────────────────┐
+              │  router  (one host)  │   ◄── runs on admin's workstation,
+              │                      │       holds the shared bot token,
+              │  • api-key registry  │       fans events to user shims
+              │  • slack ↔ user map  │
+              └──┬───────────────┬───┘
+   outbound WSS  │               │  outbound WSS
+   from shim     │               │  from shim
+                 ▼               ▼
+       ┌────────────┐    ┌────────────┐
+       │ samay's    │    │ alice's    │
+       │ workstation│    │ laptop     │
+       │            │    │            │
+       │  claude-   │    │  claude-   │
+       │  slack     │    │  slack     │
+       │  mirror    │    │  mirror    │
+       │     │      │    │     │      │
+       │     ▼      │    │     ▼      │
+       │ real       │    │ real       │
+       │ `claude`   │    │ `claude`   │  ← real Anthropic binary,
+       │ in a PTY   │    │ in a PTY   │     terminal works as normal,
+       └────────────┘    └────────────┘     local sessions stay local
 ```
 
-## Setup (about 5 minutes)
+## Setup
+
+### Admin (you, once)
 
 ```bash
 git clone https://github.com/samayc0616/claude-slack ~/claude-slack
-cd ~/claude-slack
-uv sync
-uv run claude-slack init    # wizard walks you through Slack app creation
+cd ~/claude-slack && uv sync
+uv run claude-slack-router init    # walks you through Slack app creation
+uv run claude-slack-router run     # keep running (tmux / systemd)
 ```
 
-The wizard:
-1. Generates a Slack app manifest, OSC-52 copies it to your clipboard
-2. Walks you click-by-click through app creation at <https://api.slack.com/apps>
-3. Asks for `xoxb-` Bot Token and `xapp-` App-Level Token with `connections:write`
-4. Validates the connection
-5. Writes `~/.config/claude-slack/config.toml` (mode 0600)
+The init wizard creates ONE Slack app for the whole team. Anyone in the workspace can DM `@claude`. The router process holds the single socket-mode connection.
+
+**The router lives on your machine for now.** Realistically that means:
+- Your machine needs to be on and network-reachable when teammates want to use the bot
+- Other users' shims dial in over WebSocket — they need a route to your host
+- Put the router on a real shared box once you're past prototyping
+
+#### Network reachability
+
+Teammates' shims need to reach your router. Common setups:
+
+| Setup | Router URL example |
+|---|---|
+| Everyone on the corp network with stable internal DNS | `ws://your-host.corp:9000/v1/connect` |
+| Tailscale mesh between you and teammates | `ws://samay-laptop.tail-net.ts.net:9000/v1/connect` |
+| Public IP + a reverse proxy doing TLS (nginx/caddy) | `wss://router.example.com/v1/connect` |
+| Cloudflare Tunnel from your laptop | `wss://router.your-domain.com/v1/connect` |
+
+For testing solo: just `ws://localhost:9000/v1/connect`.
+
+### Each teammate (once, ~2 minutes)
+
+```bash
+git clone https://github.com/samayc0616/claude-slack ~/claude-slack
+cd ~/claude-slack && uv sync
+export CLAUDE_SLACK_ROUTER_URL=ws://your-router-host:9000/v1/connect
+uv run claude-slack mirror
+```
+
+The first run prompts them once for an API key. To get one, they type `/claude register` in Slack — the bot DMs them their personal `cs_…` key. They paste it back into the prompt. The shim saves to `~/.config/claude-slack/config.toml` and connects.
+
+Subsequent runs: just `claude-slack mirror` (or `alias claude='claude-slack mirror'`).
 
 ## Daily use
 
 ```bash
-uv run claude-slack mirror   # instead of `claude`
-# or, optionally:
-alias claude='claude-slack mirror'
+alias claude='claude-slack mirror'   # once, in .zshrc / .bashrc
+claude                                # same UX as before, now mirrors
 ```
 
-That's it. Your terminal session looks and feels exactly like running `claude`. In parallel, a private DM with the Slack bot fills up with everything that scrolls past. Send a message in the DM and it lands as claude's next prompt.
+In Slack, they DM the `@claude` bot. Every assistant message, tool call, and their own typed prompts appear in the thread. Send a Slack message → it's injected into the running `claude` session as if typed.
 
-### From your phone
+| From the terminal | From Slack |
+|---|---|
+| Type as usual | All output streams into your DM with @claude |
+| Hit Ctrl-C | React `:no_entry:` on any bot message → SIGINT to claude |
+| `claude --resume <id>` | Resume happens through the real binary; mirror just follows along |
 
-Open the Slack app, find your DM with `@claude`, type. The text gets injected into your terminal session as if you typed it. Pull out the laptop later and your terminal has caught up.
+## Slash commands (each user)
 
-### Interrupting
-
-- React `:no_entry:` on any bot message in the DM → sends Ctrl-C to the underlying `claude`
-- Or click the Interrupt button on the session card (if visible)
-- Locally, just hit Ctrl-C in the terminal as usual
-
-### Watching from a second machine
-
-The Slack DM is the mirror. Open Slack on any device — laptop, phone, web — and you see what's happening in your terminal in near real-time.
+| Command | What it does |
+|---|---|
+| `/claude register` | Generates a new API key, DMs it to you, rotates any prior key |
+| `/claude revoke` | Removes your key + disconnects any active shim |
+| `/claude status` | Shows whether your shim is connected, key age, queued events |
 
 ## Privacy model
 
-- The DM is between **you and the bot**. Slack enforces that no one else can see it.
-- Cross-user contamination is impossible: each user runs their own shim, each gets their own DM thread.
-- The real `claude` binary runs on your machine. Claude SDK still talks directly to Anthropic from your machine.
-- Secrets get scrubbed before being mirrored to Slack: `sk-ant-*`, `xox?-*`, `ghp_*`, AWS access keys, generic `api_key=` patterns, PEM-encoded private keys.
+- **Bot is shared, DMs are not.** One `@claude` in the workspace. But Alice's DM with the bot is invisible to Bob and vice versa (Slack-enforced DM privacy).
+- **Cross-user prompts are blocked.** If Bob tries to message Alice's instance somehow, the router's channel-scoping refuses it. The shim also filters incoming messages by sender.
+- **Bot token never leaves the router.** Users' shims proxy Slack API calls through the WebSocket — they cannot exfiltrate the token even if compromised.
+- **The router host (your machine) sees prompts in flight.** This is the explicit trust call — same trust level as your internal Slack workspace itself.
+- **Claude inference happens on each user's machine.** The Claude SDK talks directly to Anthropic from there.
+- **Secrets are scrubbed** before mirroring: `sk-ant-*`, `xox?-*`, `ghp_*`, AWS access keys, PEM private keys, generic `api_key=` patterns.
 
-## What's intentionally NOT in scope
+## Admin commands
 
-The shim is just a mirror. It does not:
+```bash
+claude-slack-router list-users          # who's registered, when, last-seen
+claude-slack-router add-user --slack-user U123ABC --name samay   # manual add (rare; /claude register is preferred)
+claude-slack-router revoke --slack-user U123ABC                  # kick a user
+```
 
-- Spawn new sessions on its own (you start a session by running `claude-slack mirror`)
-- Try to be smarter than Claude Code about plans, agents, MCP, hooks — those are CLI features and they work because the real `claude` is still the thing running
-- Display ANSI eye candy (spinners, cursor magic) in Slack — we strip those because they don't render in markdown. The substance gets through.
+`/claude register` from Slack is the preferred self-serve path. The CLI commands are escape hatches.
 
 ## Limitations
 
-- **TUI rendering loss**: Claude's status spinners, cursor-rewrite progress lines, and color formatting are stripped for Slack. The text content survives; the in-place updates don't.
-- **Two-source input conflict**: if you type at the keyboard and from Slack simultaneously, both reach claude's stdin and may interleave oddly. In practice you're at one or the other.
-- **PTY-bound**: the shim only works in a real terminal. CI / batch contexts where you don't have a TTY can't use this.
+- **TUI rendering loss**: spinners and cursor-rewrite progress lines collapse in the Slack mirror. Text content survives.
+- **Two-source input conflict**: keyboard and Slack typing simultaneously can interleave on stdin. In practice you're at one or the other.
+- **PTY-bound**: the shim only works in a real terminal. No CI use.
+- **Router single-point-of-failure**: if your machine is off, nobody can use the bot. Plan to move to a shared box once you outgrow that.
+- **No router HA**: one router process per Slack app. If you restart it, in-flight shim WSes disconnect (they reconnect, but a turn in progress may glitch).
 
-## Other modes
+## What's intentionally NOT in scope
 
-There's also a daemon mode (`claude-slack run`) that spawns Claude SDK sessions in response to Slack `@mention`s — a different paradigm where Slack is the source of truth. Less polished, kept around for the "I'm not at my workstation but want to start something" case. See `claude_slack/daemon.py`. Mirror mode is the primary path.
+- Spawning new sessions from Slack (you start a session by running `claude-slack mirror` locally)
+- Replacing or wrapping Claude Code's UI — the real `claude` is what runs, so Anthropic's updates ship to you on their normal schedule
+- ANSI eye candy in Slack — we strip what doesn't render in markdown
 
-## Team deployment
+## Optional: legacy Slack-spawned daemon
 
-For >50-person deployments, see `router/README.md` for the design of a shared-app fanout architecture (one Slack app installed once, fans events out to per-user local shims). Implementation pending.
+`claude-slack run` is a separate mode where Slack `@mentions` create new SDK-driven sessions (Slack as source of truth, not mirror). Kept around for occasional use; see `claude_slack/daemon.py`. Mirror is the primary path.
+
+## License
+
+MIT.
