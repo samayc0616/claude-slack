@@ -1,8 +1,8 @@
 # claude-slack
 
-Claude Code's Remote Control feature, rebuilt with Slack as the transport. Run `claude` in your terminal as normal — every assistant message, tool call, and your prompts get mirrored into a private Slack DM with the bot. Type in Slack from your phone or another machine; that text becomes claude's next prompt as if you'd typed it yourself.
+Claude Code's Remote Control feature, rebuilt with Slack as the transport. Run `claude` in your terminal as normal — every assistant message, tool call, and your prompts get mirrored into a Slack DM. Type in Slack from your phone or another machine; that text becomes claude's next prompt as if you'd typed it yourself.
 
-**One app per person. Each user has their own Slack app install, their own tokens, and their own local `claude` session. No central infrastructure. No router. No shared bot to maintain.**
+Built to sidestep org-disabled Remote Control. Your local `claude` binary keeps running locally and stays on whatever version Anthropic ships you. The shim is a thin pipe.
 
 ## How it works
 
@@ -26,7 +26,7 @@ Claude Code's Remote Control feature, rebuilt with Slack as the transport. Run `
                            ▼
                    private DM thread
                    between you and
-                   YOUR @claude bot
+                   the Slack bot
                            ▲
                            │
                   Slack messages are
@@ -34,41 +34,40 @@ Claude Code's Remote Control feature, rebuilt with Slack as the transport. Run `
                   stdin as if typed
 ```
 
-## Setup (about 5 minutes, per user)
+## Setup (about 5 minutes)
 
 ```bash
 git clone https://github.com/samayc0616/claude-slack ~/claude-slack
 cd ~/claude-slack
 uv sync
-uv run claude-slack init       # wizard walks you through Slack app creation
+uv run claude-slack init    # wizard walks you through Slack app creation
 ```
 
 The wizard:
 1. Generates a Slack app manifest, OSC-52 copies it to your clipboard
-2. Walks you click-by-click through creating your personal app at <https://api.slack.com/apps>
+2. Walks you click-by-click through app creation at <https://api.slack.com/apps>
 3. Asks for `xoxb-` Bot Token and `xapp-` App-Level Token with `connections:write`
 4. Validates the connection
 5. Writes `~/.config/claude-slack/config.toml` (mode 0600)
 
-Your workspace admin pre-approves the manifest once. After that, anyone in the workspace creates their own personal install of the same app — each gets their own bot identity, their own DM, their own everything. No cross-user visibility ever.
-
 ## Daily use
 
 ```bash
-uv run claude-slack mirror     # instead of `claude`
+uv run claude-slack mirror   # instead of `claude`
 # or, optionally:
-alias claude='uv run claude-slack mirror'
+alias claude='claude-slack mirror'
 ```
 
-That's it. Your terminal session looks and feels exactly like running `claude`. In parallel, a private DM with YOUR @claude bot fills up with everything that scrolls past. Send a message in the DM and it lands as claude's next prompt.
+That's it. Your terminal session looks and feels exactly like running `claude`. In parallel, a private DM with the Slack bot fills up with everything that scrolls past. Send a message in the DM and it lands as claude's next prompt.
 
 ### From your phone
 
-Open the Slack app, find your DM with your @claude, type. The text gets injected into your terminal session as if you typed it. Pull out the laptop later and your terminal has caught up.
+Open the Slack app, find your DM with `@claude`, type. The text gets injected into your terminal session as if you typed it. Pull out the laptop later and your terminal has caught up.
 
 ### Interrupting
 
 - React `:no_entry:` on any bot message in the DM → sends Ctrl-C to the underlying `claude`
+- Or click the Interrupt button on the session card (if visible)
 - Locally, just hit Ctrl-C in the terminal as usual
 
 ### Watching from a second machine
@@ -77,10 +76,9 @@ The Slack DM is the mirror. Open Slack on any device — laptop, phone, web — 
 
 ## Privacy model
 
-- Each user has their own Slack app install, their own bot identity, their own DM. Slack enforces that no one else can see your DM.
-- Cross-user contamination is impossible by construction: there is no shared infrastructure, just N independent installations.
+- The DM is between **you and the bot**. Slack enforces that no one else can see it.
+- Cross-user contamination is impossible: each user runs their own shim, each gets their own DM thread.
 - The real `claude` binary runs on your machine. Claude SDK still talks directly to Anthropic from your machine.
-- Tokens (`xoxb-`, `xapp-`) live in `~/.config/claude-slack/config.toml` (mode 0600) on your machine only.
 - Secrets get scrubbed before being mirrored to Slack: `sk-ant-*`, `xox?-*`, `ghp_*`, AWS access keys, generic `api_key=` patterns, PEM-encoded private keys.
 
 ## What's intentionally NOT in scope
@@ -97,20 +95,10 @@ The shim is just a mirror. It does not:
 - **Two-source input conflict**: if you type at the keyboard and from Slack simultaneously, both reach claude's stdin and may interleave oddly. In practice you're at one or the other.
 - **PTY-bound**: the shim only works in a real terminal. CI / batch contexts where you don't have a TTY can't use this.
 
-## Admin guidance
+## Other modes
 
-If you're rolling this out to a team:
+There's also a daemon mode (`claude-slack run`) that spawns Claude SDK sessions in response to Slack `@mention`s — a different paradigm where Slack is the source of truth. Less polished, kept around for the "I'm not at my workstation but want to start something" case. See `claude_slack/daemon.py`. Mirror mode is the primary path.
 
-1. Build your own personal copy first (the steps above)
-2. Get your workspace admin to **pre-approve the app manifest** so anyone with the manifest can self-install
-3. Share the repo URL with teammates. Each runs `claude-slack init` and creates their own personal copy of the app
+## Team deployment
 
-The manifest at `~/.cache/claude-slack/manifest.json` (written during your wizard run) is the canonical artifact. Share that or this repo URL with teammates so they get the identical manifest.
-
-## Optional: legacy daemon mode
-
-There's also `claude-slack run` which runs a daemon that spawns sessions from Slack `@mentions` (the opposite paradigm — Slack is the source of truth). Less polished, kept around for "I'm not at my workstation but want to start something" cases. See `claude_slack/daemon.py`. Mirror mode is the primary path.
-
-## License
-
-MIT.
+For >50-person deployments, see `router/README.md` for the design of a shared-app fanout architecture (one Slack app installed once, fans events out to per-user local shims). Implementation pending.

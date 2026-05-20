@@ -38,10 +38,18 @@ class FeaturesConfig:
 
 
 @dataclass
+class RouterClientConfig:
+    """Set when this shim talks to a shared router instead of directly to Slack."""
+    url: str = ""
+    api_key: str = ""
+
+
+@dataclass
 class Config:
     slack: SlackConfig = field(default_factory=SlackConfig)
     claude: ClaudeConfig = field(default_factory=ClaudeConfig)
     features: FeaturesConfig = field(default_factory=FeaturesConfig)
+    router: RouterClientConfig = field(default_factory=RouterClientConfig)
 
 
 def load(path: Path = CONFIG_PATH) -> Config:
@@ -53,6 +61,7 @@ def load(path: Path = CONFIG_PATH) -> Config:
         slack=SlackConfig(**raw.get("slack", {})),
         claude=ClaudeConfig(**raw.get("claude", {})),
         features=FeaturesConfig(**raw.get("features", {})),
+        router=RouterClientConfig(**raw.get("router", {})),
     )
 
 
