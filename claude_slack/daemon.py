@@ -38,7 +38,7 @@ class Daemon:
         self._pending_answers: dict[str, asyncio.Future[str]] = {}  # tool_use_id → Future
         self._pending_questions: dict[str, dict] = {}  # tool_use_id → AUQ args
         self._auq_selections: dict[str, dict[int, list[str]]] = {}  # tool_use_id → {q_idx: [choices]}
-        self._injections: dict[str, list[str]] = {}  # thread_ts → queued user msgs while busy
+        self._injections: dict[str, list[tuple[str, str]]] = {}  # thread_ts → [(msg_ts, text)]
         self._dm_welcomed: set[str] = set()          # user_ids we've greeted in DM already
         self._assistant_threads: set[str] = set()    # thread_ts created via Assistant container
         self._bot_user_id: str = ""                  # filled at startup via auth.test
@@ -103,6 +103,10 @@ class Daemon:
         await self._dispatch(channel, thread_ts, text, parent_ts=event["ts"], user_id=user_id)
 
     async def on_message(self, event: dict, say) -> None:
+        # Handle edits first (they have subtype=message_changed).
+        if event.get("subtype") == "message_changed":
+            await self._on_message_edited(event)
+            return
         if event.get("bot_id") or event.get("subtype"):
             return
         text = event.get("text", "") or ""
@@ -134,6 +138,83 @@ class Daemon:
             text += "\n\nFiles attached:\n" + "\n".join(f"- {p}" for p in paths)
         await self._dispatch(channel, thread_ts, text, parent_ts=thread_ts, user_id=user_id)
 
+    async def _on_message_edited(self, event: dict) -> None:
+        """Handle subtype=message_changed. Behavior depends on session state."""
+        msg = event.get("message") or {}
+        prev = event.get("previous_message") or {}
+        channel = event["channel"]
+        edited_text = (msg.get("text") or "").strip()
+        prev_text = (prev.get("text") or "").strip()
+        if not edited_text or edited_text == prev_text:
+            return
+        if msg.get("bot_id"):
+            return
+        edited_ts = msg.get("ts") or ""
+        user_id = msg.get("user", "")
+        thread_ts = msg.get("thread_ts") or edited_ts
+        sess = self.sessions.get(thread_ts)
+        if not sess:
+            return
+
+        # 1) Edit lands on a queued message? Replace the matching ts in the queue.
+        queue = self._injections.get(thread_ts, [])
+        for i, (qts, _t) in enumerate(queue):
+            if qts == edited_ts:
+                queue[i] = (qts, edited_text)
+                await self._ephemeral(
+                    channel, thread_ts, user_id,
+                    ":pencil2: queued message updated to use the edited version.",
+                )
+                return
+
+        # 2) Edit lands on the LAST prompt we sent to Claude.
+        if sess.last_user_msg_ts == edited_ts:
+            if sess.status == "running":
+                # Stop + reprompt.
+                client = self._claude.get(thread_ts)
+                if client:
+                    await client.interrupt()
+                await self._say(
+                    channel, thread_ts,
+                    ":pencil2: *you edited your message — interrupting and reprompting.*",
+                )
+                reprompt = (
+                    "Note: the user edited their previous message. Disregard the prior "
+                    "version and use this corrected prompt instead.\n\n"
+                    f"OLD:\n{prev_text}\n\nCORRECTED:\n{edited_text}"
+                )
+                # Fire as a follow-up turn. We're still inside the lock from the
+                # interrupted turn, so spawn a task to re-enter _handle_turn cleanly.
+                asyncio.create_task(self._handle_turn(
+                    channel, thread_ts, reprompt, parent_ts=thread_ts, user_id=user_id,
+                ))
+                return
+            if sess.status == "waiting":
+                # Don't interrupt waiting state; just note it.
+                await self._ephemeral(
+                    channel, thread_ts, user_id,
+                    ":pencil2: edit noted, but I'm waiting on your input. Pick an option above to proceed.",
+                )
+                return
+            # done / idle / error → reprompt as a new turn.
+            await self._say(
+                channel, thread_ts,
+                ":pencil2: *picked up your edit — running again with the corrected version.*",
+            )
+            reprompt = (
+                f"The user edited their previous message. Please redo your response "
+                f"using the corrected version.\n\nOLD:\n{prev_text}\n\nCORRECTED:\n{edited_text}"
+            )
+            await self._handle_turn(channel, thread_ts, reprompt,
+                                    parent_ts=thread_ts, user_id=user_id)
+            return
+
+        # 3) Edit to an older message: too late to undo, just acknowledge.
+        await self._ephemeral(
+            channel, thread_ts, user_id,
+            ":pencil2: edit noted, but Claude has already processed that message.",
+        )
+
     async def _dispatch(self, channel: str, thread_ts: str, text: str,
                         parent_ts: str, user_id: str) -> None:
         """Route an incoming user message: queue if busy, otherwise process now."""
@@ -143,7 +224,7 @@ class Daemon:
         sess = self.sessions.get(thread_ts)
         if sess and sess.status in ("running", "waiting"):
             # Busy. Queue for the follow-up turn so the user feels heard immediately.
-            self._injections.setdefault(thread_ts, []).append(text)
+            self._injections.setdefault(thread_ts, []).append((parent_ts, text))
             try:
                 await self.web.reactions_add(
                     channel=channel, timestamp=parent_ts, name="eyes",
@@ -353,8 +434,10 @@ class Daemon:
         queued = self._injections.pop(thread_ts, [])
         if queued:
             prompt = prompt + "\n\nAdditional context queued while you were working:\n" + \
-                     "\n".join(f"- {m}" for m in queued)
+                     "\n".join(f"- {m}" for _ts, m in queued)
         self._last_prompt[thread_ts] = prompt
+        sess.last_user_msg_ts = parent_ts
+        await self.sessions.upsert(sess)
 
         async with self.sessions.lock(thread_ts):
             await self.sessions.set_status(thread_ts, "running")
@@ -367,7 +450,7 @@ class Daemon:
                 follow_up = self._injections.pop(thread_ts, [])
                 if follow_up:
                     follow_prompt = "Additional context from Slack:\n" + \
-                                    "\n".join(f"- {m}" for m in follow_up)
+                                    "\n".join(f"- {m}" for _ts, m in follow_up)
                     await self._set_assistant_status(channel, thread_ts, "incorporating new context…")
                     await self._run(sess, follow_prompt)
                 await self.sessions.set_status(thread_ts, "done")

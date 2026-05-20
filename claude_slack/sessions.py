@@ -24,6 +24,7 @@ class Session:
     total_cost_usd: float = 0.0
     total_tokens: int = 0
     last_user_id: str = ""    # Slack user who last prompted; target for waiting-DMs
+    last_user_msg_ts: str = ""  # ts of the message that became the last prompt
 
 
 class SessionManager:
