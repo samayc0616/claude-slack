@@ -1,8 +1,38 @@
 # claude-slack
 
-Drive your local Claude Code sessions from Slack. One Slack thread = one Claude session, with full `--resume` continuity. Built to sidestep org-disabled Claude Code Remote Control.
+Claude Code's Remote Control feature, rebuilt with Slack as the transport. Run `claude` in your terminal as normal — every assistant message, tool call, and your prompts get mirrored into a Slack DM. Type in Slack from your phone or another machine; that text becomes claude's next prompt as if you'd typed it yourself.
 
-The bridge runs locally on your machine. Your terminal still does the work; Slack is just the steering wheel — and your phone, because Slack apps notify.
+Built to sidestep org-disabled Remote Control. Your local `claude` binary keeps running locally and stays on whatever version Anthropic ships you. The shim is a thin pipe.
+
+## How it works
+
+```
+       your keyboard ───┐                  ┌─── your terminal (verbatim)
+                        ▼                  │
+                 ┌──────────────────────────────┐
+                 │  claude-slack mirror (shim)  │
+                 │  spawns the real `claude`    │
+                 │  in a PTY and forwards I/O   │
+                 └─────────┬────────────────────┘
+                           │
+                  ┌────────▼─────────┐
+                  │   real claude    │  ← the actual Anthropic binary,
+                  │   binary (any    │     updates via your normal channel
+                  │   version)       │
+                  └────────┬─────────┘
+                           │
+                  ANSI-stripped output
+                           │
+                           ▼
+                   private DM thread
+                   between you and
+                   the Slack bot
+                           ▲
+                           │
+                  Slack messages are
+                  injected into claude's
+                  stdin as if typed
+```
 
 ## Setup (about 5 minutes)
 
@@ -10,130 +40,65 @@ The bridge runs locally on your machine. Your terminal still does the work; Slac
 git clone https://github.com/samayc0616/claude-slack ~/claude-slack
 cd ~/claude-slack
 uv sync
-uv run claude-slack init   # wizard walks you through Slack app creation
-uv run claude-slack run    # foreground daemon; tmux/nohup/systemd for background
+uv run claude-slack init    # wizard walks you through Slack app creation
 ```
 
-The wizard copies a Slack app manifest into your clipboard via OSC 52 (works over SSH and tmux), then walks you click-by-click through:
+The wizard:
+1. Generates a Slack app manifest, OSC-52 copies it to your clipboard
+2. Walks you click-by-click through app creation at <https://api.slack.com/apps>
+3. Asks for `xoxb-` Bot Token and `xapp-` App-Level Token with `connections:write`
+4. Validates the connection
+5. Writes `~/.config/claude-slack/config.toml` (mode 0600)
 
-1. Creating the Slack app from the manifest at <https://api.slack.com/apps>
-2. Installing the app to your workspace
-3. Copying the Bot OAuth Token (`xoxb-…`)
-4. Generating an App-Level Token with `connections:write` (`xapp-…`)
-5. Inviting the bot to a channel and picking a default
+## Daily use
 
-Tokens are validated with `auth.test` before anything is written. Config lands at `~/.config/claude-slack/config.toml` (mode 0600).
-
-When the daemon starts for the first time, it posts a usage cheat-sheet to your default channel and **pins it**. So this README is just for context — the day-to-day instructions live in Slack.
-
-## Usage
-
-### Start a session
-
-| You do | Result |
-|---|---|
-| `@claude <prompt>` in any channel the bot is in | Bot replies, opening a thread. That thread now hosts the session. |
-| `/claude new <prompt>` | Same thing via slash command. |
-| DM the bot directly | First message starts a session in the DM. |
-
-### Continue a session
-
-Reply in the thread. No `@claude` needed. Each thread maps to exactly one Claude session, with full history preserved across daemon restarts.
-
-### While Claude is working
-
-| You do | Result |
-|---|---|
-| Send another message in the thread | Bot reacts `:eyes:`, queues it, and auto-feeds it as a follow-up turn |
-| Drop a file into the thread | Staged to `/tmp/claude-slack/<thread_ts>/`; the path is appended to your prompt |
-| React `:no_entry:` on any bot message | Kills the session, sets status `killed` |
-| React `:repeat:` | Replays your last prompt |
-| Click **Interrupt** on the session card | Sends Ctrl-C to the SDK client |
-| Click **Resend last** on the session card | Replays your last prompt |
-
-### When Claude needs your input
-
-- Status flips to `:raised_hand:` on the thread root
-- You get a DM with a permalink back to the thread, so your phone wakes up
-- `AskUserQuestion` shows radio (single) or checkbox (multi) blocks per question, with **Submit** and **Cancel** buttons
-- `ExitPlanMode` shows the proposed plan with **Approve** / **Reject** buttons
-- `SendUserFile` uploads the file to the thread with a caption
-
-### Slash commands
-
-| Command | What it does |
-|---|---|
-| `/claude list` | Lists all known sessions with status, cost, cwd |
-| `/claude new <prompt>` | Starts a session in a new thread |
-| `/claude kill <thread_ts>` | Force-stops a session |
-
-### Session card
-
-Pinned at the top of every thread. Shows session id, cwd, status, total cost, and your label. Updates in place as the session progresses. Has **Interrupt** and **Resend last** buttons.
-
-### Status emoji on the thread root
-
-| Emoji | Meaning |
-|---|---|
-| `:hourglass_flowing_sand:` | Claude is generating |
-| `:raised_hand:` | Claude is waiting for you (AskUserQuestion / ExitPlanMode) |
-| `:white_check_mark:` | Turn finished |
-| `:x:` | Bridge errored |
-| `:no_entry:` | Session killed |
-
-## Features
-
-- **App Home dashboard** — click the bot in Slack's left rail. See every session with status, cost, last-active, and **Jump** / **Kill** buttons. **Start new session** opens a modal with cwd + prompt + model.
-- **Slack AI Apps panel** — if your workspace has Agents & AI Apps enabled, the bot lives in the right-rail assistant panel with native status (`Claude is thinking…`), suggested follow-up prompts after each turn, and seed prompts when you open it
-- **Message shortcut "Send to Claude"** — right-click any message → forwards it as a new session's prompt
-- **Global shortcut "Start Claude session"** — keyboard shortcut from anywhere in Slack opens the new-session modal
-- **Modals for richer input** — `/claude new` (no args) and the shortcuts open a modal with cwd picker, multi-line prompt, model dropdown. **Reject** on a plan opens a feedback modal so Claude knows *why*.
-- **Ephemeral "queued" notices** — only visible to you, not channel readers
-- **Thread context preload** — `@claude` in an existing thread reads the prior messages and feeds them as Claude's starting context
-- **DM welcome** — first DM with the bot greets you with Start Session / List Sessions buttons
-- **Channel bookmark** — bot auto-adds a docs link to the channel header on startup
-- **`:clipboard:` reaction** — exports the full thread transcript as a markdown snippet
-- **Persistent sessions across daemon restarts** — `~/.local/state/claude-slack/sessions.json`
-- **YOLO permissions** by default — every tool call auto-approves. Toggle in `~/.config/claude-slack/config.toml` if you want per-call approvals.
-- **Secret redaction** — `sk-ant-*`, `xox?-*`, `ghp_*`, AWS access keys, `api_key=`, PEM keys get scrubbed before posting
-- **LLM-generated thread titles** — instant first-line label, then a background `query` task summarizes it as a 4–6 word title and updates the card
-- **DM-when-waiting** — phone notifications even if the thread is buried
-- **`@bridge` mid-stream queue** — messages during a running turn auto-feed as the follow-up turn
-
-## Architecture
-
-```
-your terminal                                Slack
-     │                                         ▲
-     │ stdout/stdin                            │ Bolt async + socket mode
-     ▼                                         │
-  daemon ──┬── ClaudeSDKClient (per thread) ───┘
-           ├── SessionManager (JSON persist)
-           ├── interactive UI mappers (Block Kit)
-           └── inbound file staging
+```bash
+uv run claude-slack mirror   # instead of `claude`
+# or, optionally:
+alias claude='claude-slack mirror'
 ```
 
-| File | Purpose |
-|---|---|
-| `claude_slack/__main__.py` | CLI dispatch: `init` / `run` / `list` / `kill` |
-| `claude_slack/wizard.py` | Questionary setup flow with OSC-52 manifest copy |
-| `claude_slack/clipboard.py` | OSC 52 emit (tmux + screen pass-through wrap) |
-| `claude_slack/config.py` | `~/.config/claude-slack/config.toml` load/save |
-| `claude_slack/sessions.py` | Per-thread state, async locks, JSON persistence |
-| `claude_slack/claude_proc.py` | `ClaudeSDKClient` wrapper, streaming, `can_use_tool` routing |
-| `claude_slack/daemon.py` | Slack socket-mode app, all event handlers |
-| `claude_slack/slack_render.py` | ANSI strip, mrkdwn, chunking, snippet thresholds |
-| `claude_slack/interactive.py` | Block Kit renderers + session card |
-| `claude_slack/redact.py` | Secret scrubbing |
+That's it. Your terminal session looks and feels exactly like running `claude`. In parallel, a private DM with the Slack bot fills up with everything that scrolls past. Send a message in the DM and it lands as claude's next prompt.
 
-## Caveats
+### From your phone
 
-- The bot doesn't know about Claude Code sessions you started elsewhere (terminal, other machines). Every Slack thread starts a fresh session. `/claude attach <session_id>` to import an existing session is on the roadmap.
-- `ExitPlanMode` semantics under `bypassPermissions` may differ from the interactive CLI; if plan-mode entries don't surface, set `yolo_permissions = false` in config.
-- File uploads use `files_upload_v2`; long debugging sessions with frequent file dumps can hit Slack's per-channel rate limit.
-- If the socket disconnects while a tool prompt was awaiting your click, the session will hang in `waiting`. Restart the daemon to recover.
-- Secret redaction is regex-based and conservative. Inspect anything before pasting elsewhere.
+Open the Slack app, find your DM with `@claude`, type. The text gets injected into your terminal session as if you typed it. Pull out the laptop later and your terminal has caught up.
 
-## License
+### Interrupting
 
-MIT, do whatever.
+- React `:no_entry:` on any bot message in the DM → sends Ctrl-C to the underlying `claude`
+- Or click the Interrupt button on the session card (if visible)
+- Locally, just hit Ctrl-C in the terminal as usual
+
+### Watching from a second machine
+
+The Slack DM is the mirror. Open Slack on any device — laptop, phone, web — and you see what's happening in your terminal in near real-time.
+
+## Privacy model
+
+- The DM is between **you and the bot**. Slack enforces that no one else can see it.
+- Cross-user contamination is impossible: each user runs their own shim, each gets their own DM thread.
+- The real `claude` binary runs on your machine. Claude SDK still talks directly to Anthropic from your machine.
+- Secrets get scrubbed before being mirrored to Slack: `sk-ant-*`, `xox?-*`, `ghp_*`, AWS access keys, generic `api_key=` patterns, PEM-encoded private keys.
+
+## What's intentionally NOT in scope
+
+The shim is just a mirror. It does not:
+
+- Spawn new sessions on its own (you start a session by running `claude-slack mirror`)
+- Try to be smarter than Claude Code about plans, agents, MCP, hooks — those are CLI features and they work because the real `claude` is still the thing running
+- Display ANSI eye candy (spinners, cursor magic) in Slack — we strip those because they don't render in markdown. The substance gets through.
+
+## Limitations
+
+- **TUI rendering loss**: Claude's status spinners, cursor-rewrite progress lines, and color formatting are stripped for Slack. The text content survives; the in-place updates don't.
+- **Two-source input conflict**: if you type at the keyboard and from Slack simultaneously, both reach claude's stdin and may interleave oddly. In practice you're at one or the other.
+- **PTY-bound**: the shim only works in a real terminal. CI / batch contexts where you don't have a TTY can't use this.
+
+## Other modes
+
+There's also a daemon mode (`claude-slack run`) that spawns Claude SDK sessions in response to Slack `@mention`s — a different paradigm where Slack is the source of truth. Less polished, kept around for the "I'm not at my workstation but want to start something" case. See `claude_slack/daemon.py`. Mirror mode is the primary path.
+
+## Team deployment
+
+For >50-person deployments, see `router/README.md` for the design of a shared-app fanout architecture (one Slack app installed once, fans events out to per-user local shims). Implementation pending.

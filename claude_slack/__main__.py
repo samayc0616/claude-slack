@@ -19,6 +19,11 @@ def cmd_run(_args) -> int:
     return daemon.run()
 
 
+def cmd_mirror(args) -> int:
+    from . import shim
+    return shim.run(args.claude_args or [])
+
+
 def cmd_list(_args) -> int:
     if not SESSIONS_PATH.exists():
         print("(no sessions)")
@@ -50,8 +55,15 @@ def main(argv: list[str] | None = None) -> int:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("init", help="Run the setup wizard").set_defaults(fn=cmd_init)
-    sub.add_parser("run", help="Start the bridge daemon").set_defaults(fn=cmd_run)
+    sub.add_parser("run", help="Start the Slack-spawned daemon (legacy)").set_defaults(fn=cmd_run)
     sub.add_parser("list", help="List known sessions").set_defaults(fn=cmd_list)
+
+    p_mirror = sub.add_parser(
+        "mirror", help="Spawn `claude` under a PTY and mirror to Slack",
+    )
+    p_mirror.add_argument("claude_args", nargs=argparse.REMAINDER,
+                           help="Args passed through to the underlying `claude` binary")
+    p_mirror.set_defaults(fn=cmd_mirror)
 
     p_kill = sub.add_parser("kill", help="Forget a session record")
     p_kill.add_argument("thread_ts")
