@@ -11,16 +11,14 @@ import tomli_w
 
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "claude-slack"
 CONFIG_PATH = CONFIG_DIR / "config.toml"
-STATE_DIR = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state")) / "claude-slack"
-SESSIONS_PATH = STATE_DIR / "sessions.json"
 
 
 @dataclass
 class SlackConfig:
     bot_token: str = ""
     app_token: str = ""
-    channel_id: str = ""
     workspace_name: str = ""
+    slack_user_id: str = ""    # the installer's Slack user id; mirror DMs to this user
 
 
 @dataclass
@@ -31,10 +29,7 @@ class ClaudeConfig:
 
 @dataclass
 class FeaturesConfig:
-    auto_name_threads: bool = True
     secret_redaction: bool = True
-    session_card: bool = True
-    yolo_permissions: bool = True
 
 
 @dataclass

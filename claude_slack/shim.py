@@ -335,17 +335,7 @@ class Shim:
         me = await self.web.auth_test()
         self._bot_user_id = me.get("user_id", "")
         self._bot_name = me.get("user", "claude")
-        # Resolve which user this shim is for: prefer config, else fall back to channel owner.
-        cfg_user = getattr(self.cfg.slack, "slack_user_id", "") or ""
-        if cfg_user:
-            self._dm_user_id = cfg_user
-        elif self.cfg.slack.channel_id and self.cfg.slack.channel_id.startswith("D"):
-            try:
-                ch = await self.web.conversations_info(channel=self.cfg.slack.channel_id)
-                self._dm_user_id = (ch.get("channel") or {}).get("user", "")
-                self._dm_channel = self.cfg.slack.channel_id
-            except Exception:
-                pass
+        self._dm_user_id = getattr(self.cfg.slack, "slack_user_id", "") or ""
 
     async def start(self) -> None:
         await self._bootstrap()

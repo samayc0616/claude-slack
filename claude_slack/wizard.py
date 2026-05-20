@@ -1,5 +1,5 @@
-"""TUI setup wizard. Walks the user through Slack app creation, scope-by-scope,
-with pause points so each Slack-side click happens before the next instruction."""
+"""Solo-mode setup wizard. Creates a personal Slack app, picks the installer user,
+writes config. The team-mode wizard lives in router/wizard.py."""
 from __future__ import annotations
 
 import asyncio
@@ -12,12 +12,11 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.rule import Rule
 from rich.syntax import Syntax
-from rich.text import Text
 from slack_sdk.web.async_client import AsyncWebClient
 
 from . import clipboard
 from . import config as cfg_mod
-from .config import Config, SlackConfig, ClaudeConfig, FeaturesConfig, RouterClientConfig
+from .config import Config, SlackConfig, ClaudeConfig, FeaturesConfig
 
 console = Console()
 
@@ -27,66 +26,27 @@ DEFAULT_BOT_NAME = "claude"
 
 
 def _manifest(display_name: str) -> dict:
+    """Solo-mode manifest. Mirror-only, no slash commands or AI Apps surface."""
     return {
         "display_information": {
             "name": display_name,
-            "description": "Drives local Claude Code sessions from Slack",
+            "description": "Mirror your local Claude Code session into a private Slack DM",
         },
         "features": {
-            "app_home": {
-                "home_tab_enabled": True,
-                "messages_tab_enabled": True,
-                "messages_tab_read_only_enabled": False,
-            },
-            "assistant_view": {
-                "assistant_description": "Drive your local Claude Code sessions from Slack.",
-                "suggested_prompts": [
-                    {"title": "Start a new session", "message": "Hi Claude, help me with: "},
-                    {"title": "List my sessions", "message": "/claude list"},
-                ],
-            },
             "bot_user": {"display_name": display_name, "always_online": True},
-            "slash_commands": [{
-                "command": "/claude",
-                "description": "Control Claude Code sessions",
-                "usage_hint": "new <prompt> | list | kill <thread_ts>",
-                "should_escape": False,
-            }],
-            "shortcuts": [
-                {
-                    "name": "Send to Claude",
-                    "type": "message",
-                    "callback_id": "msg_send_to_claude",
-                    "description": "Start a new Claude Code session with this message as the prompt",
-                },
-                {
-                    "name": "Start Claude session",
-                    "type": "global",
-                    "callback_id": "global_new_session",
-                    "description": "Open a modal to start a new Claude Code session",
-                },
-            ],
         },
         "oauth_config": {
             "scopes": {
                 "bot": [
-                    "app_mentions:read",
-                    "assistant:write",
-                    "bookmarks:read",
-                    "bookmarks:write",
-                    "channels:history",
                     "chat:write",
-                    "commands",
                     "files:read",
                     "files:write",
-                    "groups:history",
                     "im:history",
+                    "im:read",
                     "im:write",
-                    "mpim:history",
                     "pins:read",
                     "pins:write",
                     "reactions:read",
-                    "reactions:write",
                     "users:read",
                 ],
             },
@@ -94,18 +54,11 @@ def _manifest(display_name: str) -> dict:
         "settings": {
             "event_subscriptions": {
                 "bot_events": [
-                    "app_home_opened",
-                    "app_mention",
-                    "assistant_thread_context_changed",
-                    "assistant_thread_started",
-                    "message.channels",
-                    "message.groups",
                     "message.im",
-                    "message.mpim",
                     "reaction_added",
                 ],
             },
-            "interactivity": {"is_enabled": True},
+            "interactivity": {"is_enabled": False},
             "org_deploy_enabled": False,
             "socket_mode_enabled": True,
             "token_rotation_enabled": False,
@@ -113,25 +66,9 @@ def _manifest(display_name: str) -> dict:
     }
 
 
-# ---------- presentation helpers ----------
-
-def _banner() -> None:
-    console.print(Panel.fit(
-        "[bold cyan]claude-slack setup[/bold cyan]\n"
-        "We'll create a Slack app, hook it up, and write your config.\n"
-        "Total time: about 5 minutes.\n"
-        "[dim]Tip: keep this terminal next to your browser so you can flip between them.[/dim]",
-        border_style="cyan",
-    ))
-
-
 def _rule(title: str) -> None:
     console.print()
     console.print(Rule(f"[bold cyan]{title}[/bold cyan]", style="cyan"))
-
-
-def _say(text: str) -> None:
-    console.print(text)
 
 
 def _step(label: str, body: str) -> None:
@@ -139,132 +76,71 @@ def _step(label: str, body: str) -> None:
 
 
 async def _pause(prompt: str = "Press Enter when ready") -> None:
-    # questionary.press_any_key_to_continue is convenient but it eats characters;
-    # plain Enter is friendlier.
     await questionary.text(prompt, default="", instruction="(Enter)").ask_async()
 
 
-# ---------- the steps ----------
+# ---------- steps ----------
 
 async def _step_bot_name() -> str:
-    _rule("Step 1 of 6 — Pick a bot name")
-    _say("This is what shows up in Slack. You'll @mention it to start sessions.")
-    name = await questionary.text(
+    _rule("Step 1 of 5 — Bot name")
+    console.print("  This is the @-name your bot shows up as in Slack. You'll DM this user.")
+    return await questionary.text(
         "Bot display name:",
         default=DEFAULT_BOT_NAME,
-        validate=lambda v: (len(v) > 0 and len(v) <= 35) or "1-35 chars",
-    ).ask_async()
-    return name or DEFAULT_BOT_NAME
-
-
-def _write_manifest(name: str) -> Path:
-    MANIFEST_PATH.parent.mkdir(parents=True, exist_ok=True)
-    MANIFEST_PATH.write_text(json.dumps(_manifest(name), indent=2))
-    return MANIFEST_PATH
+        validate=lambda v: (0 < len(v) <= 35) or "1-35 chars",
+    ).ask_async() or DEFAULT_BOT_NAME
 
 
 async def _step_create_app(name: str) -> None:
-    path = _write_manifest(name)
-    manifest_text = path.read_text()
-    copied = clipboard.copy(manifest_text)
+    MANIFEST_PATH.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(_manifest(name), indent=2)
+    MANIFEST_PATH.write_text(text)
+    copied = clipboard.copy(text)
 
-    _rule("Step 2 of 6 — Create the Slack app")
-
+    _rule("Step 2 of 5 — Create the Slack app")
     if copied:
         console.print(Panel.fit(
-            ":clipboard: [bold green]Manifest is in your clipboard.[/bold green]\n"
-            f"   [dim]Also saved to[/dim] [bold]{path}[/bold]\n"
-            "   [dim]If clipboard didn't take (some terminals block OSC 52),\n"
-            "   re-copy from the file with[/dim] [bold]xclip -sel clip <[/bold] or just paste from the path.",
+            ":clipboard: [bold green]Manifest is on your clipboard.[/bold green]\n"
+            f"   [dim]Also saved to[/dim] [bold]{MANIFEST_PATH}[/bold]",
             border_style="green",
         ))
     else:
-        console.print(Panel.fit(
-            f":clipboard: [yellow]Could not OSC 52 copy.[/yellow] Manifest saved to:\n   [bold]{path}[/bold]\n"
-            "   [dim]Copy it manually with[/dim] [bold]cat ~/.cache/claude-slack/manifest.json[/bold]\n"
-            "   [dim]then select-all in your terminal.[/dim]",
-            border_style="yellow",
-        ))
+        console.print(f"  [yellow]OSC 52 copy failed.[/yellow] Manifest at [bold]{MANIFEST_PATH}[/bold]")
 
-    _say("")
-    _step("2a.", "Open [link=https://api.slack.com/apps]https://api.slack.com/apps[/link] in a browser.")
-    _step("2b.", "Sign in if needed. Click the green [bold]Create New App[/bold] button (top right).")
-    _step("2c.", "A modal pops up. Click [bold]From an app manifest[/bold]"
-                 " ([dim]not[/dim] [italic]From scratch[/italic]).")
-    _step("2d.", "Pick your workspace from the dropdown, then click [bold]Next[/bold].")
-    _step("2e.", "You'll land on a page titled [italic]Enter app manifest below[/italic].\n"
-                 "         At the top of the code editor there are tabs: [bold]YAML[/bold] and [bold]JSON[/bold].\n"
-                 "         Click the [bold]JSON[/bold] tab.")
-    _step("2f.", "Click inside the editor. Select everything in it:"
-                 " [bold]Cmd-A[/bold] on Mac / [bold]Ctrl-A[/bold] on Linux/Windows. Hit [bold]Delete[/bold].")
-    _step("2g.", "Paste: [bold]Cmd-V[/bold] / [bold]Ctrl-V[/bold]."
-                 " The manifest is already on your clipboard.")
-    _step("2h.", "Click [bold]Next[/bold] at the bottom-right of the page.")
-    _step("2i.", "Slack shows a summary of OAuth scopes, bot events, and the [italic]/claude[/italic] "
-                 "slash command. Click [bold]Create[/bold].")
-
+    console.print()
+    _step("2a.", "Open [link=https://api.slack.com/apps]https://api.slack.com/apps[/link]")
+    _step("2b.", "Click [bold]Create New App[/bold] → [bold]From an app manifest[/bold]")
+    _step("2c.", "Pick your workspace, click [bold]Next[/bold]")
+    _step("2d.", "Click the [bold]JSON[/bold] tab → Cmd-A → Delete → paste → [bold]Next[/bold] → [bold]Create[/bold]")
     if not copied:
-        _say("\n[dim]Manifest contents (the JSON file you'll paste):[/dim]")
-        console.print(Syntax(manifest_text, "json", word_wrap=False, line_numbers=False))
-
-    await _pause("Press Enter once you see the new app's settings page in your browser")
+        console.print(Syntax(text, "json", word_wrap=False))
+    await _pause("Press Enter once the app is created")
 
 
-async def _step_install_app() -> None:
-    _rule("Step 3 of 6 — Install the app to your workspace")
-    _step("3a.", "You're now on the app's settings page. The URL looks like"
-                 " [italic]api.slack.com/apps/A0XXXXXX[/italic].")
-    _step("3b.", "Look at the [bold]left sidebar[/bold]. Under the [italic]Settings[/italic] section,"
-                 " click [bold]Install App[/bold].")
-    _step("3c.", "You'll see a big [bold]Install to <Your Workspace>[/bold] button. Click it.")
-    _step("3d.", "Slack shows an OAuth screen with the scopes the app wants. Click [bold]Allow[/bold].")
-    _step("3e.", "You'll be returned to the [italic]Install App[/italic] page,"
-                 " now showing a [bold]Bot User OAuth Token[/bold] at the top. Leave this tab open.")
-    _say("\n[dim]Locked-down workspace? The [bold]Install to Workspace[/bold] button may say"
-         " [italic]Request to Install[/italic] instead. You'll need an admin to approve before continuing.[/dim]")
-    await _pause()
+async def _step_install() -> None:
+    _rule("Step 3 of 5 — Install the app + grab tokens")
+    _step("3a.", "Left sidebar → [bold]Install App[/bold] → [bold]Install to Workspace[/bold] → [bold]Allow[/bold]")
+    _step("3b.", "[bold]OAuth & Permissions[/bold] page → copy [bold]Bot User OAuth Token[/bold] (xoxb-...)")
+    _step("3c.", "[bold]Basic Information[/bold] → scroll to [bold]App-Level Tokens[/bold] → "
+                  "[bold]Generate Token and Scopes[/bold], add [italic]connections:write[/italic], "
+                  "[bold]Generate[/bold] → copy (xapp-...)")
 
 
-async def _step_bot_token() -> str:
-    _rule("Step 4 of 6 — Copy the Bot User OAuth Token")
-    _step("4a.", "In the [bold]left sidebar[/bold], under [italic]Features[/italic],"
-                 " click [bold]OAuth & Permissions[/bold].")
-    _step("4b.", "At the top of the page you'll see a [italic]Tokens for Your Workspace[/italic]"
-                 " heading with [bold]Bot User OAuth Token[/bold] right below.")
-    _step("4c.", "Click the [bold]Copy[/bold] button next to it."
-                 " It starts with [italic]xoxb-[/italic] and is ~50 chars long.")
-    _say("\n[dim]Token won't echo as you paste below.[/dim]\n")
-    tok = await questionary.password(
-        "Paste Bot User OAuth Token (xoxb-...):",
+async def _ask_tokens() -> tuple[str, str]:
+    bot = await questionary.password(
+        "Bot User OAuth Token (xoxb-...):",
         validate=lambda v: v.startswith("xoxb-") or "must start with xoxb-",
     ).ask_async()
-    return tok or ""
-
-
-async def _step_app_token() -> str:
-    _rule("Step 5 of 6 — Create an App-Level Token (for Socket Mode)")
-    _step("5a.", "In the [bold]left sidebar[/bold], under [italic]Settings[/italic],"
-                 " click [bold]Basic Information[/bold].")
-    _step("5b.", "Scroll down the page until you find the [bold]App-Level Tokens[/bold] section"
-                 " ([italic]below[/italic] [italic]Display Information[/italic]).")
-    _step("5c.", "Click [bold]Generate Token and Scopes[/bold].")
-    _step("5d.", "In the modal: [bold]Token Name[/bold] = [italic]socket-mode[/italic]"
-                 " (or anything; just a label).")
-    _step("5e.", "Click [bold]Add Scope[/bold], pick [bold]connections:write[/bold] from the dropdown.")
-    _step("5f.", "Click the [bold]Generate[/bold] button. A new screen shows the token.")
-    _step("5g.", "Click [bold]Copy[/bold]. It starts with [italic]xapp-[/italic]"
-                 " and is significantly longer than the bot token.")
-    _step("5h.", "Click [bold]Done[/bold] to close the modal.")
-    _say("")
-    tok = await questionary.password(
-        "Paste App-Level Token (xapp-...):",
+    if not bot:
+        return "", ""
+    app = await questionary.password(
+        "App-Level Token (xapp-...):",
         validate=lambda v: v.startswith("xapp-") or "must start with xapp-",
     ).ask_async()
-    return tok or ""
+    return bot or "", app or ""
 
 
 async def _verify(bot_token: str) -> tuple[bool, str, str, str]:
-    """Returns (ok, team, user, error_or_empty)."""
     client = AsyncWebClient(token=bot_token)
     try:
         resp = await client.auth_test()
@@ -273,178 +149,48 @@ async def _verify(bot_token: str) -> tuple[bool, str, str, str]:
         return False, "", "", str(e)
 
 
-async def _list_channels(bot_token: str) -> list[dict]:
+async def _list_human_users(bot_token: str) -> list[dict]:
+    """Workspace members, filtered to humans (no bots, no deleted)."""
     client = AsyncWebClient(token=bot_token)
-    chans: list[dict] = []
+    out: list[dict] = []
     cursor = ""
     while True:
-        resp = await client.conversations_list(
-            cursor=cursor, limit=200,
-            types="public_channel,private_channel,im,mpim",
-            exclude_archived=True,
-        )
-        chans.extend(resp.get("channels", []))
+        resp = await client.users_list(cursor=cursor, limit=200)
+        for u in resp.get("members", []) or []:
+            if u.get("is_bot") or u.get("deleted") or u.get("id") == "USLACKBOT":
+                continue
+            out.append(u)
         cursor = (resp.get("response_metadata") or {}).get("next_cursor", "")
         if not cursor:
             break
-    return chans
+    return out
 
 
-def _channel_label(c: dict) -> str:
-    if c.get("is_im"):
-        return f"DM with {c.get('user', '?')}"
-    name = c.get("name") or c.get("id")
-    kind = "private" if c.get("is_private") else "public"
-    member = "" if c.get("is_member") else "  [not joined yet]"
-    return f"#{name} ({kind}){member}"
-
-
-async def _step_pick_channel(bot_token: str, bot_name: str) -> str:
-    _rule("Step 6 of 6 — Choose a channel and invite the bot")
-    _say(f"Before listing channels, invite the bot in Slack. In any channel where you "
-         f"want it to live, type:  [bold]/invite @{bot_name}[/bold]")
-    _say("[dim]You can do this in more than one channel; the bot can run in all of them. "
-         "We just need a default for slash commands.[/dim]\n")
-    await _pause("Press Enter after you've invited the bot")
-
-    chans = await _list_channels(bot_token)
-    chans.sort(key=lambda c: (not c.get("is_member", False),
-                              c.get("is_im", False),
-                              c.get("name") or ""))
-    choices = [questionary.Choice(title=_channel_label(c), value=c["id"]) for c in chans]
+async def _step_pick_user(bot_token: str) -> str:
+    _rule("Step 4 of 5 — Which Slack user is this for?")
+    console.print("  Mirror DMs to one specific user (you). Pick yourself from the workspace.")
+    console.print()
+    users = await _list_human_users(bot_token)
+    users.sort(key=lambda u: (u.get("profile", {}).get("display_name") or u.get("name") or u.get("id")))
+    choices = [
+        questionary.Choice(
+            title=f"{(u.get('profile') or {}).get('real_name') or u.get('name', '?')}  ({u['id']})",
+            value=u["id"],
+        )
+        for u in users
+    ]
     if not choices:
-        console.print("[red]No channels visible to the bot.[/red] Invite it to one and re-run.")
+        console.print("[red]No users visible.[/red] users:read scope missing?")
         return ""
     return await questionary.select(
-        "Default channel for slash commands:",
+        "Pick yourself:",
         choices=choices,
     ).ask_async() or ""
 
 
-async def _step_defaults() -> tuple[str, str]:
-    _rule("Defaults for new sessions")
+async def _step_locals() -> tuple[str, str, bool]:
+    _rule("Step 5 of 5 — Local defaults")
     cwd = await questionary.path(
-        "Default working directory for new sessions:",
-        default=str(Path.cwd()),
-    ).ask_async()
-    model = await questionary.select(
-        "Model:",
-        choices=["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"],
-        default="claude-opus-4-7",
-    ).ask_async()
-    return cwd or str(Path.cwd()), model or "claude-opus-4-7"
-
-
-async def _step_features() -> tuple[bool, bool, bool, bool]:
-    _rule("Optional features")
-    auto_name = await questionary.confirm("Auto-name threads from first prompt?", default=True).ask_async()
-    redact = await questionary.confirm("Redact secrets before posting to Slack?", default=True).ask_async()
-    card = await questionary.confirm("Pin a live session card at thread top?", default=True).ask_async()
-    yolo = await questionary.confirm(
-        "Pre-approve all tool calls (YOLO permissions)?", default=True,
-    ).ask_async()
-    return auto_name, redact, card, yolo
-
-
-# ---------- main flow ----------
-
-async def _run_async() -> int:
-    _banner()
-
-    if cfg_mod.exists():
-        overwrite = await questionary.confirm(
-            f"Config exists at {cfg_mod.CONFIG_PATH}. Overwrite?", default=False,
-        ).ask_async()
-        if not overwrite:
-            console.print("[yellow]Aborted.[/yellow] Existing config left untouched.")
-            return 0
-
-    bot_name = await _step_bot_name()
-    await _step_create_app(bot_name)
-    await _step_install_app()
-    bot_token = await _step_bot_token()
-    if not bot_token:
-        return 1
-    app_token = await _step_app_token()
-    if not app_token:
-        return 1
-
-    _rule("Verifying Slack connection")
-    ok, team, user, err = await _verify(bot_token)
-    if not ok:
-        console.print(f"[red]Auth failed:[/red] {err}\n"
-                      "  Common causes: wrong token, app not installed yet, "
-                      "or you copied the Configuration Token instead of the Bot Token.")
-        return 2
-    console.print(f"  [green]OK[/green]  connected as [bold]{user}[/bold] "
-                  f"in workspace [bold]{team}[/bold]")
-
-    channel_id = await _step_pick_channel(bot_token, bot_name)
-    if not channel_id:
-        return 3
-
-    default_cwd, model = await _step_defaults()
-    auto_name, redact, card, yolo = await _step_features()
-
-    config = Config(
-        slack=SlackConfig(
-            bot_token=bot_token, app_token=app_token,
-            channel_id=channel_id, workspace_name=team,
-        ),
-        claude=ClaudeConfig(default_cwd=default_cwd, model=model),
-        features=FeaturesConfig(
-            auto_name_threads=auto_name, secret_redaction=redact,
-            session_card=card, yolo_permissions=yolo,
-        ),
-    )
-    cfg_mod.save(config)
-
-    _rule("Done")
-    console.print(f"  [green]Wrote[/green] {cfg_mod.CONFIG_PATH} (mode 600)")
-    console.print(f"  [dim]Manifest cached at[/dim] {MANIFEST_PATH}")
-    console.print()
-    console.print(Panel.fit(
-        f"[bold]Next:[/bold]\n"
-        f"  1. Start the daemon: [bold cyan]uv run claude-slack run[/bold cyan]\n"
-        f"     [dim](keep it in a tmux pane so you can watch logs)[/dim]\n"
-        f"  2. In Slack, in a channel where you invited [bold]@{bot_name}[/bold], try:\n"
-        f"     [bold]@{bot_name} hello[/bold]\n"
-        f"  3. Reply in the thread it opens to continue the session.",
-        border_style="green",
-    ))
-    return 0
-
-
-async def _client_async() -> int:
-    console.print(Panel.fit(
-        "[bold cyan]claude-slack setup (client mode)[/bold cyan]\n"
-        "Hook your local shim to a shared router your admin runs.\n"
-        "You only need the router URL and an API key — your admin DMs you both.",
-        border_style="cyan",
-    ))
-    if cfg_mod.exists():
-        if not await questionary.confirm(
-            f"Config exists at {cfg_mod.CONFIG_PATH}. Overwrite?", default=False,
-        ).ask_async():
-            console.print("[yellow]Aborted.[/yellow]")
-            return 0
-
-    _rule("Step 1 of 2 — Router connection")
-    url = await questionary.text(
-        "Router URL (wss://... or ws://...):",
-        validate=lambda v: (v.startswith("wss://") or v.startswith("ws://")) or "must start with wss:// or ws://",
-    ).ask_async()
-    if not url:
-        return 1
-    api_key = await questionary.password(
-        "API key from your admin (cs_...):",
-        validate=lambda v: v.startswith("cs_") or "must start with cs_",
-    ).ask_async()
-    if not api_key:
-        return 1
-
-    _rule("Step 2 of 2 — Local defaults")
-    default_cwd = await questionary.path(
         "Default working directory:", default=str(Path.cwd()),
     ).ask_async() or str(Path.cwd())
     model = await questionary.select(
@@ -452,32 +198,72 @@ async def _client_async() -> int:
         choices=["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"],
         default="claude-opus-4-7",
     ).ask_async() or "claude-opus-4-7"
-    redact = await questionary.confirm("Redact secrets before posting?", default=True).ask_async()
+    redact = await questionary.confirm(
+        "Redact secrets before mirroring to Slack?", default=True,
+    ).ask_async()
+    return cwd, model, bool(redact)
+
+
+# ---------- main flow ----------
+
+async def _run_async() -> int:
+    console.print(Panel.fit(
+        "[bold cyan]claude-slack setup (solo mode)[/bold cyan]\n"
+        "Creates a personal Slack app and configures the mirror.\n"
+        "[dim]For team deployments, use the router instead — see router/README.md.[/dim]",
+        border_style="cyan",
+    ))
+
+    if cfg_mod.exists():
+        if not await questionary.confirm(
+            f"Config exists at {cfg_mod.CONFIG_PATH}. Overwrite?", default=False,
+        ).ask_async():
+            console.print("[yellow]Aborted.[/yellow]")
+            return 0
+
+    bot_name = await _step_bot_name()
+    await _step_create_app(bot_name)
+    await _step_install()
+    bot_token, app_token = await _ask_tokens()
+    if not bot_token or not app_token:
+        return 1
+
+    _rule("Verifying")
+    ok, team, who, err = await _verify(bot_token)
+    if not ok:
+        console.print(f"[red]Auth failed:[/red] {err}")
+        return 2
+    console.print(f"  [green]OK[/green]  connected as [bold]{who}[/bold] in [bold]{team}[/bold]")
+
+    slack_user_id = await _step_pick_user(bot_token)
+    if not slack_user_id:
+        return 3
+    cwd, model, redact = await _step_locals()
 
     cfg = Config(
-        slack=SlackConfig(),
-        claude=ClaudeConfig(default_cwd=default_cwd, model=model),
+        slack=SlackConfig(
+            bot_token=bot_token, app_token=app_token,
+            workspace_name=team, slack_user_id=slack_user_id,
+        ),
+        claude=ClaudeConfig(default_cwd=cwd, model=model),
         features=FeaturesConfig(secret_redaction=redact),
-        router=RouterClientConfig(url=url, api_key=api_key),
     )
     cfg_mod.save(cfg)
+
     _rule("Done")
-    console.print(f"  [green]Wrote[/green] {cfg_mod.CONFIG_PATH}")
+    console.print(f"  [green]Wrote[/green] {cfg_mod.CONFIG_PATH} (mode 600)")
     console.print()
     console.print(Panel.fit(
-        "[bold]Next:[/bold]\n"
-        "  Start a session: [bold cyan]claude-slack mirror[/bold cyan]\n"
-        "  Or alias: [bold]alias claude='claude-slack mirror'[/bold] then just type [bold]claude[/bold].\n"
-        "  Your DM with the bot in Slack will mirror everything.",
+        f"[bold]Next:[/bold]\n"
+        f"  Run [bold cyan]claude-slack mirror[/bold cyan] (or alias it to [bold]claude[/bold]).\n"
+        f"  Open Slack and DM [bold]@{bot_name}[/bold] — that's where the mirror lands.",
         border_style="green",
     ))
     return 0
 
 
-def run(client: bool = False) -> int:
+def run() -> int:
     try:
-        if client:
-            return asyncio.run(_client_async())
         return asyncio.run(_run_async())
     except KeyboardInterrupt:
         console.print("\n[yellow]Cancelled.[/yellow]")

@@ -174,10 +174,6 @@ claude-slack-router revoke --slack-user U123ABC                  # kick a user
 - Replacing or wrapping Claude Code's UI — the real `claude` is what runs, so Anthropic's updates ship to you on their normal schedule
 - ANSI eye candy in Slack — we strip what doesn't render in markdown
 
-## Optional: legacy Slack-spawned daemon
-
-`claude-slack run` is a separate mode where Slack `@mentions` create new SDK-driven sessions (Slack as source of truth, not mirror). Kept around for occasional use; see `claude_slack/daemon.py`. Mirror is the primary path.
-
 ## License
 
 MIT.
