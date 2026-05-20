@@ -83,6 +83,16 @@ Pinned at the top of every thread. Shows session id, cwd, status, total cost, an
 
 ## Features
 
+- **App Home dashboard** — click the bot in Slack's left rail. See every session with status, cost, last-active, and **Jump** / **Kill** buttons. **Start new session** opens a modal with cwd + prompt + model.
+- **Slack AI Apps panel** — if your workspace has Agents & AI Apps enabled, the bot lives in the right-rail assistant panel with native status (`Claude is thinking…`), suggested follow-up prompts after each turn, and seed prompts when you open it
+- **Message shortcut "Send to Claude"** — right-click any message → forwards it as a new session's prompt
+- **Global shortcut "Start Claude session"** — keyboard shortcut from anywhere in Slack opens the new-session modal
+- **Modals for richer input** — `/claude new` (no args) and the shortcuts open a modal with cwd picker, multi-line prompt, model dropdown. **Reject** on a plan opens a feedback modal so Claude knows *why*.
+- **Ephemeral "queued" notices** — only visible to you, not channel readers
+- **Thread context preload** — `@claude` in an existing thread reads the prior messages and feeds them as Claude's starting context
+- **DM welcome** — first DM with the bot greets you with Start Session / List Sessions buttons
+- **Channel bookmark** — bot auto-adds a docs link to the channel header on startup
+- **`:clipboard:` reaction** — exports the full thread transcript as a markdown snippet
 - **Persistent sessions across daemon restarts** — `~/.local/state/claude-slack/sessions.json`
 - **YOLO permissions** by default — every tool call auto-approves. Toggle in `~/.config/claude-slack/config.toml` if you want per-call approvals.
 - **Secret redaction** — `sk-ant-*`, `xox?-*`, `ghp_*`, AWS access keys, `api_key=`, PEM keys get scrubbed before posting

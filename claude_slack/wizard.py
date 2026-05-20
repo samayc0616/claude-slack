@@ -33,6 +33,18 @@ def _manifest(display_name: str) -> dict:
             "description": "Drives local Claude Code sessions from Slack",
         },
         "features": {
+            "app_home": {
+                "home_tab_enabled": True,
+                "messages_tab_enabled": True,
+                "messages_tab_read_only_enabled": False,
+            },
+            "assistant_view": {
+                "assistant_description": "Drive your local Claude Code sessions from Slack.",
+                "suggested_prompts": [
+                    {"title": "Start a new session", "message": "Hi Claude, help me with: "},
+                    {"title": "List my sessions", "message": "/claude list"},
+                ],
+            },
             "bot_user": {"display_name": display_name, "always_online": True},
             "slash_commands": [{
                 "command": "/claude",
@@ -40,23 +52,41 @@ def _manifest(display_name: str) -> dict:
                 "usage_hint": "new <prompt> | list | kill <thread_ts>",
                 "should_escape": False,
             }],
+            "shortcuts": [
+                {
+                    "name": "Send to Claude",
+                    "type": "message",
+                    "callback_id": "msg_send_to_claude",
+                    "description": "Start a new Claude Code session with this message as the prompt",
+                },
+                {
+                    "name": "Start Claude session",
+                    "type": "global",
+                    "callback_id": "global_new_session",
+                    "description": "Open a modal to start a new Claude Code session",
+                },
+            ],
         },
         "oauth_config": {
             "scopes": {
                 "bot": [
                     "app_mentions:read",
+                    "assistant:write",
+                    "bookmarks:read",
+                    "bookmarks:write",
                     "channels:history",
+                    "chat:write",
+                    "commands",
+                    "files:read",
+                    "files:write",
                     "groups:history",
                     "im:history",
+                    "im:write",
                     "mpim:history",
-                    "chat:write",
-                    "files:write",
-                    "files:read",
-                    "reactions:read",
-                    "reactions:write",
                     "pins:read",
                     "pins:write",
-                    "commands",
+                    "reactions:read",
+                    "reactions:write",
                     "users:read",
                 ],
             },
@@ -64,7 +94,10 @@ def _manifest(display_name: str) -> dict:
         "settings": {
             "event_subscriptions": {
                 "bot_events": [
+                    "app_home_opened",
                     "app_mention",
+                    "assistant_thread_context_changed",
+                    "assistant_thread_started",
                     "message.channels",
                     "message.groups",
                     "message.im",

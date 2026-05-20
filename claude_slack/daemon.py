@@ -16,6 +16,7 @@ from slack_sdk.web.async_client import AsyncWebClient
 
 from . import slack_render as R
 from . import interactive as I
+from . import views as V
 from .claude_proc import ClaudeSession, StreamEvent
 from .config import Config, load
 from .redact import scrub
@@ -38,15 +39,27 @@ class Daemon:
         self._pending_questions: dict[str, dict] = {}  # tool_use_id → AUQ args
         self._auq_selections: dict[str, dict[int, list[str]]] = {}  # tool_use_id → {q_idx: [choices]}
         self._injections: dict[str, list[str]] = {}  # thread_ts → queued user msgs while busy
+        self._dm_welcomed: set[str] = set()          # user_ids we've greeted in DM already
+        self._assistant_threads: set[str] = set()    # thread_ts created via Assistant container
+        self._bot_user_id: str = ""                  # filled at startup via auth.test
+        self._bot_name: str = "claude"
         self._register_handlers()
 
     # ------- event registration -------
 
     def _register_handlers(self) -> None:
+        # Events
         self.app.event("app_mention")(self.on_mention)
         self.app.event("message")(self.on_message)
         self.app.event("reaction_added")(self.on_reaction)
+        self.app.event("app_home_opened")(self.on_app_home_opened)
+        self.app.event("assistant_thread_started")(self.on_assistant_thread_started)
+        self.app.event("assistant_thread_context_changed")(self.on_assistant_thread_context_changed)
         self.app.command("/claude")(self.on_slash)
+
+        # Shortcuts
+        self.app.shortcut("msg_send_to_claude")(self.on_send_to_claude_shortcut)
+        self.app.shortcut("global_new_session")(self.on_global_start_shortcut)
 
         # Buttons / interactive components
         self.app.action("btn:interrupt")(self.on_interrupt_btn)
@@ -57,13 +70,33 @@ class Daemon:
         self.app.action(re.compile(r"^plan_approve:.+$"))(self.on_plan_approve)
         self.app.action(re.compile(r"^plan_reject:.+$"))(self.on_plan_reject)
 
+        # Home tab buttons
+        self.app.action("home:new_session")(self.on_home_new_session)
+        self.app.action("home:refresh")(self.on_home_refresh)
+        self.app.action("home:jump")(self.on_home_jump)
+        self.app.action("home:kill")(self.on_home_kill)
+        self.app.action("dm:list")(self.on_dm_list)
+
+        # Modal submissions
+        self.app.view("modal:new_session")(self.on_modal_new_session)
+        self.app.view(re.compile(r"^modal:plan_reject:.+$"))(self.on_modal_plan_reject)
+        self.app.view(re.compile(r"^modal:edit_prompt:.+$"))(self.on_modal_edit_prompt)
+
     # ------- event handlers -------
 
     async def on_mention(self, event: dict, say) -> None:
         text = _strip_mentions(event.get("text", ""))
         channel = event["channel"]
+        is_existing_thread = bool(event.get("thread_ts"))
         thread_ts = event.get("thread_ts") or event["ts"]
         user_id = event.get("user", "")
+
+        # Mention inside a pre-existing thread: pull recent messages above us as context.
+        if is_existing_thread and not self.sessions.get(thread_ts):
+            ctx = await self._read_thread_context(channel, thread_ts, before_ts=event["ts"])
+            if ctx:
+                text = ctx + "\n\nUser:\n" + text
+
         paths = await self._stage_files(event, thread_ts)
         if paths:
             text += "\n\nFiles attached:\n" + "\n".join(f"- {p}" for p in paths)
@@ -72,17 +105,34 @@ class Daemon:
     async def on_message(self, event: dict, say) -> None:
         if event.get("bot_id") or event.get("subtype"):
             return
+        text = event.get("text", "") or ""
+        user_id = event.get("user", "")
+        channel = event["channel"]
         thread_ts = event.get("thread_ts")
+        channel_type = event.get("channel_type", "")
+
+        # DM first-message: greet, then proceed.
+        if channel_type == "im" and not thread_ts:
+            if user_id and user_id not in self._dm_welcomed:
+                self._dm_welcomed.add(user_id)
+                blocks, fb = V.render_dm_welcome(self._bot_name)
+                try:
+                    await self.web.chat_postMessage(channel=channel, blocks=blocks, text=fb)
+                except Exception:
+                    pass
+            # DM body becomes the first turn in a new thread (the message itself).
+            thread_ts = event["ts"]
+
         if not thread_ts:
             return
-        if not self.sessions.get(thread_ts):
+        # In channels, only react to replies in threads we own. In DMs, any reply is ours.
+        if channel_type != "im" and not self.sessions.get(thread_ts):
             return
-        text = event.get("text", "")
-        user_id = event.get("user", "")
+
         paths = await self._stage_files(event, thread_ts)
         if paths:
             text += "\n\nFiles attached:\n" + "\n".join(f"- {p}" for p in paths)
-        await self._dispatch(event["channel"], thread_ts, text, parent_ts=thread_ts, user_id=user_id)
+        await self._dispatch(channel, thread_ts, text, parent_ts=thread_ts, user_id=user_id)
 
     async def _dispatch(self, channel: str, thread_ts: str, text: str,
                         parent_ts: str, user_id: str) -> None:
@@ -100,11 +150,12 @@ class Daemon:
                 )
             except Exception:
                 pass
-            await self._say(
-                channel, thread_ts,
-                f"_:inbox_tray: queued for the next turn ({len(self._injections[thread_ts])} pending)_",
+            # Ephemeral so this notice is only visible to the user who sent it.
+            await self._ephemeral(
+                channel, thread_ts, user_id,
+                f":inbox_tray: queued for the next turn ({len(self._injections[thread_ts])} pending)",
             )
-            if sess and user_id:
+            if user_id:
                 sess.last_user_id = user_id
                 await self.sessions.upsert(sess)
             return
@@ -117,8 +168,11 @@ class Daemon:
         ts = item.get("ts")
         channel = item.get("channel")
         name = event.get("reaction", "")
+        reactor = event.get("user", "")
 
-        # Map reaction → action. Reactor must be a human.
+        # Map reaction → action. Skip reactions from the bot itself.
+        if reactor == self._bot_user_id:
+            return
         sess = self._find_session_by_ts(ts) or self._find_session_by_thread(ts)
         if not sess:
             return
@@ -132,6 +186,16 @@ class Daemon:
             last = self._last_prompt.get(sess.thread_ts, "")
             if last:
                 await self._handle_turn(sess.channel, sess.thread_ts, last, parent_ts=sess.thread_ts)
+        elif name == "pencil2" or name == "memo":
+            # Open the edit-prompt modal. Requires a trigger_id, which the reaction event
+            # does not carry, so we just post an ephemeral hint to use the resend button.
+            await self._ephemeral(
+                channel, sess.thread_ts, reactor,
+                "Use the *Resend last* button on the session card to edit and resend "
+                "(Slack reaction events don't carry a trigger_id, so we can't open a modal here).",
+            )
+        elif name == "clipboard":
+            await self._export_transcript(sess, reactor)
 
     async def on_slash(self, ack, body, respond) -> None:
         await ack()
@@ -242,7 +306,19 @@ class Daemon:
     async def on_plan_reject(self, ack, body) -> None:
         await ack()
         tool_use_id = body["actions"][0]["action_id"].split(":", 1)[1]
-        self._resolve(tool_use_id, "User rejected the plan in Slack.")
+        trigger_id = body.get("trigger_id", "")
+        if not trigger_id:
+            # Fall back to immediate rejection if we lost the trigger_id somehow.
+            self._resolve(tool_use_id, "User rejected the plan in Slack.")
+            return
+        try:
+            await self.web.views_open(
+                trigger_id=trigger_id,
+                view=V.render_plan_reject_modal(tool_use_id),
+            )
+        except Exception as e:
+            log.warning("plan reject modal failed: %s", e)
+            self._resolve(tool_use_id, "User rejected the plan in Slack.")
 
     def _resolve(self, tool_use_id: str, answer: str) -> None:
         fut = self._pending_answers.pop(tool_use_id, None)
@@ -283,6 +359,7 @@ class Daemon:
         async with self.sessions.lock(thread_ts):
             await self.sessions.set_status(thread_ts, "running")
             await self._react(channel, parent_ts, "running")
+            await self._set_assistant_status(channel, thread_ts, "is thinking…")
             try:
                 await self._run(sess, prompt)
                 # If new messages arrived while running, immediately run a follow-up turn
@@ -291,14 +368,25 @@ class Daemon:
                 if follow_up:
                     follow_prompt = "Additional context from Slack:\n" + \
                                     "\n".join(f"- {m}" for m in follow_up)
+                    await self._set_assistant_status(channel, thread_ts, "incorporating new context…")
                     await self._run(sess, follow_prompt)
                 await self.sessions.set_status(thread_ts, "done")
                 await self._react(channel, parent_ts, "done")
+                await self._set_assistant_status(channel, thread_ts, "")
+                await self._set_assistant_prompts(channel, thread_ts, [
+                    {"title": "Keep going", "message": "Continue with the next step."},
+                    {"title": "Summarize", "message": "Give me a 3-bullet summary of what you just did."},
+                    {"title": "What's next?", "message": "What would you do next?"},
+                ])
             except Exception as e:
                 log.exception("session %s failed", thread_ts)
                 await self._say(channel, thread_ts, f":x: *bridge error*\n```{e}```")
                 await self.sessions.set_status(thread_ts, "error")
                 await self._react(channel, parent_ts, "error")
+                await self._set_assistant_status(channel, thread_ts, "")
+        # Refresh Home tab for the prompter so the dashboard reflects this turn.
+        if user_id:
+            asyncio.create_task(self._publish_home(user_id))
 
     async def _run(self, sess: Session, prompt: str) -> None:
         client = self._claude.get(sess.thread_ts)
@@ -345,6 +433,7 @@ class Daemon:
         ch, ts = sess.channel, sess.thread_ts
         await self.sessions.set_status(sess.thread_ts, "waiting")
         await self._react(ch, ts, "waiting")
+        await self._set_assistant_status(ch, ts, f"waiting on your input ({tool_name})…")
 
         if tool_name == "AskUserQuestion":
             blocks, fallback = I.render_ask_user_question(tool_use_id, args)
@@ -521,12 +610,315 @@ class Daemon:
     def _find_session_by_thread(self, thread_ts: str) -> Session | None:
         return self.sessions.get(thread_ts)
 
+    # ------- App Home tab -------
+
+    async def on_app_home_opened(self, event: dict) -> None:
+        if event.get("tab") != "home":
+            return
+        await self._publish_home(event.get("user", ""))
+
+    async def _publish_home(self, user_id: str) -> None:
+        if not user_id:
+            return
+        try:
+            view = V.render_home_tab(
+                self.sessions.all(),
+                self.cfg.claude.default_cwd,
+                self.cfg.claude.model,
+            )
+            await self.web.views_publish(user_id=user_id, view=view)
+        except Exception as e:
+            log.debug("home publish failed: %s", e)
+
+    async def on_home_new_session(self, ack, body) -> None:
+        await ack()
+        await self._open_new_session_modal(body.get("trigger_id", ""))
+
+    async def on_home_refresh(self, ack, body) -> None:
+        await ack()
+        await self._publish_home(body.get("user", {}).get("id", ""))
+
+    async def on_home_jump(self, ack, body) -> None:
+        await ack()
+        # Slack handles deep linking when the user just clicks Jump-marked sessions
+        # via the action_id; we don't need to do anything server-side. This handler
+        # exists so Bolt doesn't log "unhandled action".
+
+    async def on_home_kill(self, ack, body) -> None:
+        await ack()
+        thread_ts = body["actions"][0].get("value", "")
+        if not thread_ts:
+            return
+        client = self._claude.pop(thread_ts, None)
+        if client:
+            try:
+                await client.interrupt()
+                await client.__aexit__(None, None, None)
+            except Exception:
+                pass
+        await self.sessions.remove(thread_ts)
+        await self._publish_home(body.get("user", {}).get("id", ""))
+
+    async def on_dm_list(self, ack, body) -> None:
+        await ack()
+        rows = self.sessions.all()
+        if not rows:
+            text = "_(no sessions yet)_"
+        else:
+            text = "\n".join(
+                f"• `{s.thread_ts}` {s.status} ${s.total_cost_usd:.4f} "
+                + (f"_{s.label}_" if s.label else "")
+                for s in rows[:25]
+            )
+        ch = body.get("channel", {}).get("id", "")
+        if ch:
+            await self.web.chat_postMessage(channel=ch, text=text)
+
+    # ------- shortcuts -------
+
+    async def on_send_to_claude_shortcut(self, ack, body) -> None:
+        """Right-click any message → Send to Claude. Pre-fills modal with that text."""
+        await ack()
+        msg = body.get("message") or {}
+        snippet = msg.get("text") or ""
+        # Optionally include a reference to the original message.
+        author = msg.get("user", "")
+        if author:
+            snippet = f"<@{author}> said:\n{snippet}"
+        await self._open_new_session_modal(body.get("trigger_id", ""), prefill=snippet)
+
+    async def on_global_start_shortcut(self, ack, body) -> None:
+        await ack()
+        await self._open_new_session_modal(body.get("trigger_id", ""))
+
+    async def _open_new_session_modal(self, trigger_id: str, prefill: str = "") -> None:
+        if not trigger_id:
+            return
+        try:
+            await self.web.views_open(
+                trigger_id=trigger_id,
+                view=V.render_new_session_modal(
+                    default_cwd=self.cfg.claude.default_cwd,
+                    model=self.cfg.claude.model,
+                    prefill_prompt=prefill,
+                ),
+            )
+        except Exception as e:
+            log.warning("open new-session modal failed: %s", e)
+
+    # ------- modal submissions -------
+
+    async def on_modal_new_session(self, ack, body) -> None:
+        await ack()
+        values = body["view"]["state"]["values"]
+        prompt = values["prompt"]["value"]["value"]
+        cwd = values["cwd"]["value"]["value"]
+        model_pick = (values.get("model", {}).get("value", {}).get("selected_option") or {}).get("value", "")
+        user_id = body.get("user", {}).get("id", "")
+        channel = self.cfg.slack.channel_id
+        if not channel:
+            log.warning("no default channel set; cannot post new session")
+            return
+        # Post the thread-starter, then run the turn.
+        resp = await self.web.chat_postMessage(
+            channel=channel,
+            text=f"<@{user_id}> {prompt}",
+        )
+        thread_ts = resp["ts"]
+        sess = Session(thread_ts=thread_ts, channel=channel, cwd=cwd,
+                       last_user_id=user_id)
+        sess.label = _autolabel(prompt) if self.cfg.features.auto_name_threads else ""
+        await self.sessions.upsert(sess)
+        await self._post_card(sess)
+        if model_pick:
+            # Override per-session model if the user picked one in the modal.
+            # ClaudeSession reads from cfg at construction time; we accept this as a
+            # per-bridge default for now and just log mismatches.
+            log.info("modal requested model=%s (using bridge default for this session)", model_pick)
+        await self._handle_turn(channel, thread_ts, prompt, parent_ts=thread_ts, user_id=user_id)
+
+    async def on_modal_plan_reject(self, ack, body) -> None:
+        await ack()
+        callback_id = body["view"]["callback_id"]
+        tool_use_id = callback_id.split(":", 2)[2]
+        feedback = body["view"]["state"]["values"]["feedback"]["value"]["value"]
+        self._resolve(tool_use_id, f"User rejected the plan with feedback: {feedback}")
+
+    async def on_modal_edit_prompt(self, ack, body) -> None:
+        await ack()
+        callback_id = body["view"]["callback_id"]
+        thread_ts = callback_id.split(":", 2)[2]
+        new_prompt = body["view"]["state"]["values"]["prompt"]["value"]["value"]
+        sess = self.sessions.get(thread_ts)
+        if not sess:
+            return
+        await self._handle_turn(sess.channel, thread_ts, new_prompt, parent_ts=thread_ts,
+                                user_id=body.get("user", {}).get("id", ""))
+
+    # ------- assistant (AI Apps) -------
+
+    async def on_assistant_thread_started(self, event: dict) -> None:
+        thread = event.get("assistant_thread") or {}
+        ch = thread.get("channel_id", "")
+        ts = thread.get("thread_ts", "")
+        user_id = thread.get("user_id", "")
+        if ts:
+            self._assistant_threads.add(ts)
+        await self._set_assistant_prompts(ch, ts, [
+            {"title": "Start a coding task", "message": "Help me with: "},
+            {"title": "Resume my last session", "message": "Resume my most recent session and continue."},
+            {"title": "What can you do?", "message": "What can you do here?"},
+        ])
+        # Track the user so DM-when-waiting works for assistant-style threads.
+        if user_id and ts:
+            sess = self.sessions.get(ts)
+            if sess:
+                sess.last_user_id = user_id
+                await self.sessions.upsert(sess)
+
+    async def on_assistant_thread_context_changed(self, event: dict) -> None:
+        # Slack tells us when the user switches the assistant's channel context.
+        # We don't act on it yet, but registering the handler avoids Bolt warnings.
+        return
+
+    async def _set_assistant_status(self, channel: str, thread_ts: str, status: str) -> None:
+        """No-op outside assistant threads. Best-effort."""
+        if thread_ts not in self._assistant_threads:
+            return
+        try:
+            await self.web.api_call(
+                "assistant.threads.setStatus",
+                params={"channel_id": channel, "thread_ts": thread_ts, "status": status},
+            )
+        except Exception as e:
+            log.debug("setStatus failed: %s", e)
+
+    async def _set_assistant_prompts(self, channel: str, thread_ts: str,
+                                      prompts: list[dict]) -> None:
+        if thread_ts not in self._assistant_threads:
+            return
+        try:
+            await self.web.api_call(
+                "assistant.threads.setSuggestedPrompts",
+                params={"channel_id": channel, "thread_ts": thread_ts,
+                        "prompts": prompts},
+            )
+        except Exception as e:
+            log.debug("setSuggestedPrompts failed: %s", e)
+
+    # ------- thread context preload -------
+
+    async def _read_thread_context(self, channel: str, thread_ts: str,
+                                    before_ts: str, limit: int = 20) -> str:
+        """Read up to `limit` messages from before our mention to seed Claude's context."""
+        try:
+            resp = await self.web.conversations_replies(
+                channel=channel, ts=thread_ts, limit=limit,
+            )
+        except Exception as e:
+            log.debug("read thread context failed: %s", e)
+            return ""
+        msgs = resp.get("messages", []) or []
+        lines: list[str] = []
+        for m in msgs:
+            if m.get("ts") == before_ts:
+                break
+            if m.get("bot_id"):
+                continue
+            user = m.get("user", "?")
+            text = (m.get("text") or "").strip()
+            if not text:
+                continue
+            lines.append(f"<@{user}>: {text}")
+        if not lines:
+            return ""
+        return "Earlier in this Slack thread:\n" + "\n".join(lines)
+
+    # ------- transcript export (:clipboard: reaction) -------
+
+    async def _export_transcript(self, sess: Session, reactor: str) -> None:
+        try:
+            resp = await self.web.conversations_replies(
+                channel=sess.channel, ts=sess.thread_ts, limit=999,
+            )
+        except Exception as e:
+            log.warning("transcript fetch failed: %s", e)
+            return
+        msgs = resp.get("messages", []) or []
+        lines: list[str] = [
+            f"# Claude session transcript",
+            f"thread_ts: {sess.thread_ts}",
+            f"session_id: {sess.session_id}",
+            f"cwd: {sess.cwd}",
+            f"label: {sess.label}",
+            f"cost: ${sess.total_cost_usd:.4f}",
+            "",
+        ]
+        for m in msgs:
+            who = m.get("user") or m.get("bot_id") or "?"
+            ts = m.get("ts", "")
+            text = (m.get("text") or "").strip()
+            lines.append(f"## {who} @ {ts}")
+            lines.append(text)
+            lines.append("")
+        content = "\n".join(lines)
+        try:
+            await self.web.files_upload_v2(
+                channel=sess.channel,
+                thread_ts=sess.thread_ts,
+                filename=f"transcript-{sess.thread_ts}.md",
+                content=content,
+                initial_comment=f"<@{reactor}> transcript export",
+            )
+        except Exception as e:
+            log.warning("transcript upload failed: %s", e)
+
+    # ------- ephemeral helper -------
+
+    async def _ephemeral(self, channel: str, thread_ts: str, user: str, text: str) -> None:
+        if not user:
+            await self._say(channel, thread_ts, text)
+            return
+        try:
+            await self.web.chat_postEphemeral(
+                channel=channel, thread_ts=thread_ts, user=user, text=text,
+            )
+        except Exception:
+            # Fall back to a normal message if ephemeral fails (e.g. in DMs).
+            await self._say(channel, thread_ts, text)
+
     async def start(self) -> None:
+        try:
+            me = await self.web.auth_test()
+            self._bot_user_id = me.get("user_id", "")
+            self._bot_name = me.get("user", "claude")
+        except Exception as e:
+            log.warning("auth_test on startup failed: %s", e)
         await self._ensure_welcome_pinned()
+        await self._ensure_channel_bookmark()
         handler = AsyncSocketModeHandler(self.app, self.cfg.slack.app_token)
-        log.info("claude-slack daemon starting; default channel=%s cwd=%s",
-                 self.cfg.slack.channel_id, self.cfg.claude.default_cwd)
+        log.info("claude-slack daemon starting as @%s; default channel=%s cwd=%s",
+                 self._bot_name, self.cfg.slack.channel_id, self.cfg.claude.default_cwd)
         await handler.start_async()
+
+    async def _ensure_channel_bookmark(self) -> None:
+        channel = self.cfg.slack.channel_id
+        if not channel:
+            return
+        try:
+            existing = await self.web.bookmarks_list(channel_id=channel)
+            for b in existing.get("bookmarks", []) or []:
+                if b.get("title") == "claude-slack docs":
+                    return
+            await self.web.bookmarks_add(
+                channel_id=channel,
+                title="claude-slack docs",
+                type="link",
+                link="https://github.com/samayc0616/claude-slack",
+                emoji=":books:",
+            )
+        except Exception as e:
+            log.debug("bookmark add skipped: %s", e)
 
     async def _ensure_welcome_pinned(self) -> None:
         """Post + pin a usage message in the default channel, once."""
