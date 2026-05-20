@@ -17,7 +17,7 @@ from slack_sdk.web.async_client import AsyncWebClient
 
 from . import clipboard
 from . import config as cfg_mod
-from .config import Config, SlackConfig, ClaudeConfig, FeaturesConfig, RouterClientConfig
+from .config import Config, SlackConfig, ClaudeConfig, FeaturesConfig
 
 console = Console()
 
@@ -405,79 +405,16 @@ async def _run_async() -> int:
     console.print()
     console.print(Panel.fit(
         f"[bold]Next:[/bold]\n"
-        f"  1. Start the daemon: [bold cyan]uv run claude-slack run[/bold cyan]\n"
-        f"     [dim](keep it in a tmux pane so you can watch logs)[/dim]\n"
-        f"  2. In Slack, in a channel where you invited [bold]@{bot_name}[/bold], try:\n"
-        f"     [bold]@{bot_name} hello[/bold]\n"
-        f"  3. Reply in the thread it opens to continue the session.",
+        f"  Start mirroring: [bold cyan]uv run claude-slack mirror[/bold cyan]\n"
+        f"  Or alias: [bold]alias claude='uv run claude-slack mirror'[/bold] then just type [bold]claude[/bold].\n"
+        f"  Your DM with [bold]@{bot_name}[/bold] mirrors everything from your terminal.",
         border_style="green",
     ))
     return 0
 
 
-async def _client_async() -> int:
-    console.print(Panel.fit(
-        "[bold cyan]claude-slack setup (client mode)[/bold cyan]\n"
-        "Hook your local shim to a shared router your admin runs.\n"
-        "You only need the router URL and an API key — your admin DMs you both.",
-        border_style="cyan",
-    ))
-    if cfg_mod.exists():
-        if not await questionary.confirm(
-            f"Config exists at {cfg_mod.CONFIG_PATH}. Overwrite?", default=False,
-        ).ask_async():
-            console.print("[yellow]Aborted.[/yellow]")
-            return 0
-
-    _rule("Step 1 of 2 — Router connection")
-    url = await questionary.text(
-        "Router URL (wss://... or ws://...):",
-        validate=lambda v: (v.startswith("wss://") or v.startswith("ws://")) or "must start with wss:// or ws://",
-    ).ask_async()
-    if not url:
-        return 1
-    api_key = await questionary.password(
-        "API key from your admin (cs_...):",
-        validate=lambda v: v.startswith("cs_") or "must start with cs_",
-    ).ask_async()
-    if not api_key:
-        return 1
-
-    _rule("Step 2 of 2 — Local defaults")
-    default_cwd = await questionary.path(
-        "Default working directory:", default=str(Path.cwd()),
-    ).ask_async() or str(Path.cwd())
-    model = await questionary.select(
-        "Model:",
-        choices=["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"],
-        default="claude-opus-4-7",
-    ).ask_async() or "claude-opus-4-7"
-    redact = await questionary.confirm("Redact secrets before posting?", default=True).ask_async()
-
-    cfg = Config(
-        slack=SlackConfig(),
-        claude=ClaudeConfig(default_cwd=default_cwd, model=model),
-        features=FeaturesConfig(secret_redaction=redact),
-        router=RouterClientConfig(url=url, api_key=api_key),
-    )
-    cfg_mod.save(cfg)
-    _rule("Done")
-    console.print(f"  [green]Wrote[/green] {cfg_mod.CONFIG_PATH}")
-    console.print()
-    console.print(Panel.fit(
-        "[bold]Next:[/bold]\n"
-        "  Start a session: [bold cyan]claude-slack mirror[/bold cyan]\n"
-        "  Or alias: [bold]alias claude='claude-slack mirror'[/bold] then just type [bold]claude[/bold].\n"
-        "  Your DM with the bot in Slack will mirror everything.",
-        border_style="green",
-    ))
-    return 0
-
-
-def run(client: bool = False) -> int:
+def run() -> int:
     try:
-        if client:
-            return asyncio.run(_client_async())
         return asyncio.run(_run_async())
     except KeyboardInterrupt:
         console.print("\n[yellow]Cancelled.[/yellow]")
