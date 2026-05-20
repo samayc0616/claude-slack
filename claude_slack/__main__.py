@@ -9,9 +9,9 @@ from .config import SESSIONS_PATH
 from .sessions import SessionManager
 
 
-def cmd_init(_args) -> int:
+def cmd_init(args) -> int:
     from . import wizard
-    return wizard.run()
+    return wizard.run(client=getattr(args, "client", False))
 
 
 def cmd_run(_args) -> int:
@@ -20,6 +20,12 @@ def cmd_run(_args) -> int:
 
 
 def cmd_mirror(args) -> int:
+    # Auto-select transport: if config has [router] block, use client shim; else direct.
+    from .config import load
+    cfg = load()
+    if cfg.router.url and cfg.router.api_key:
+        from . import client_shim
+        return client_shim.run(args.claude_args or [])
     from . import shim
     return shim.run(args.claude_args or [])
 
@@ -54,7 +60,10 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="claude-slack", description="Slack bridge for Claude Code")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("init", help="Run the setup wizard").set_defaults(fn=cmd_init)
+    p_init = sub.add_parser("init", help="Run the setup wizard")
+    p_init.add_argument("--client", action="store_true",
+                         help="Client mode: connect to a shared router instead of creating a personal Slack app")
+    p_init.set_defaults(fn=cmd_init)
     sub.add_parser("run", help="Start the Slack-spawned daemon (legacy)").set_defaults(fn=cmd_run)
     sub.add_parser("list", help="List known sessions").set_defaults(fn=cmd_list)
 
