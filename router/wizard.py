@@ -170,9 +170,13 @@ async def _run_async() -> int:
 
     _rule("Step 4 of 4 — Router server settings")
     host = await questionary.text("Bind host:", default="0.0.0.0").ask_async() or "0.0.0.0"
-    port_s = await questionary.text("Bind port:", default="9000",
-                                     validate=lambda v: v.isdigit() or "digits only").ask_async()
-    port = int(port_s or 9000)
+    port_s = await questionary.text(
+        "Bind port:",
+        default="31415",
+        validate=lambda v: v.isdigit() or "digits only",
+        instruction="(pi by default; uncommon enough to avoid common-service collisions)",
+    ).ask_async()
+    port = int(port_s or 31415)
     public_url = await questionary.text(
         "Public URL teammates dial (wss://...):",
         default=f"ws://{host}:{port}/v1/connect",

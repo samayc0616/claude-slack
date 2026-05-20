@@ -60,19 +60,19 @@ Teammates' shims need to reach your router. Common setups:
 
 | Setup | Router URL example |
 |---|---|
-| Everyone on the corp network with stable internal DNS | `ws://your-host.corp:9000/v1/connect` |
-| Tailscale mesh between you and teammates | `ws://samay-laptop.tail-net.ts.net:9000/v1/connect` |
+| Everyone on the corp network with stable internal DNS | `ws://your-host.corp:31415/v1/connect` |
+| Tailscale mesh between you and teammates | `ws://samay-laptop.tail-net.ts.net:31415/v1/connect` |
 | Public IP + a reverse proxy doing TLS (nginx/caddy) | `wss://router.example.com/v1/connect` |
 | Cloudflare Tunnel from your laptop | `wss://router.your-domain.com/v1/connect` |
 
-For testing solo: just `ws://localhost:9000/v1/connect`.
+For testing solo: just `ws://localhost:31415/v1/connect`.
 
 ### Each teammate (once, ~2 minutes)
 
 ```bash
 git clone https://github.com/samayc0616/claude-slack ~/claude-slack
 cd ~/claude-slack && uv sync
-export CLAUDE_SLACK_ROUTER_URL=ws://your-router-host:9000/v1/connect
+export CLAUDE_SLACK_ROUTER_URL=ws://your-router-host:31415/v1/connect
 uv run claude-slack mirror
 ```
 
@@ -80,7 +80,7 @@ The first run drops you into a polished setup TUI:
 
 ```
 ╭─ claude-slack mirror · first-time setup ─────────────────────╮
-│  Router: ws://strata6:9000/v1/connect                        │
+│  Router: ws://strata6:31415/v1/connect                        │
 ╰──────────────────────────────────────────────────────────────╯
 
 ── Step 1 of 2  get your API key from Slack ──
@@ -104,7 +104,7 @@ It's totally fine for users to run their shim on the same machine as the router 
 - Router config: `~/.config/claude-slack-router/`
 - User shim config: `~/.config/claude-slack/`
 
-Each user has their own home directory and therefore their own config. They use the same router URL as anyone else (`ws://strata6:9000/v1/connect`) — the connection just stays on the local loopback.
+Each user has their own home directory and therefore their own config. They use the same router URL as anyone else (`ws://strata6:31415/v1/connect`) — the connection just stays on the local loopback.
 
 ## Daily use
 

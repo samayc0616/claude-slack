@@ -30,7 +30,7 @@ class SlackConfig:
 @dataclass
 class ServerConfig:
     host: str = "0.0.0.0"
-    port: int = 9000
+    port: int = 31415                 # pi; uncommon enough to dodge common-service collisions
     public_url: str = ""              # e.g. "wss://router.internal.example.com/v1/connect"
     queue_ttl_seconds: int = 86400    # 24h
     queue_max_per_user: int = 1000

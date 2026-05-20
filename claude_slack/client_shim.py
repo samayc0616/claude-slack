@@ -263,7 +263,7 @@ def _bootstrap_config():
         console.print(Panel.fit(
             "[bold red]claude-slack mirror: not configured.[/bold red]\n\n"
             "  Set the router URL:\n"
-            "  [bold cyan]export CLAUDE_SLACK_ROUTER_URL=ws://<router-host>:9000/v1/connect[/bold cyan]\n\n"
+            "  [bold cyan]export CLAUDE_SLACK_ROUTER_URL=ws://<router-host>:31415/v1/connect[/bold cyan]\n\n"
             "  Then re-run [bold]claude-slack mirror[/bold].\n"
             "  Ask your admin for the router host if you don't know it.",
             border_style="red",
