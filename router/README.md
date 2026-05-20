@@ -1,6 +1,8 @@
-# claude-slack-router
+# claude-slack: router mode
 
 One Slack app installed once at the workspace level, used by everyone on the team. Each user's experience is a private 1:1 conversation with the bot — same model as a notifier app. No public channels, no shared threads, no cross-user visibility.
+
+This subdirectory holds the **router** process. The user-side daemon lives in `../claude_slack/`. An admin runs `claude-slack-router` on a shared box; teammates run `claude-slack run --mode=client`.
 
 ## The model
 
@@ -93,8 +95,8 @@ Since sessions live in DMs only, routing is straightforward:
 ### Admin setup (once)
 
 ```bash
-git clone https://github.com/samayc0616/claude-slack-router /opt/claude-slack-router
-cd /opt/claude-slack-router
+git clone https://github.com/samayc0616/claude-slack /opt/claude-slack
+cd /opt/claude-slack
 uv sync
 uv run claude-slack-router init
 ```
@@ -177,6 +179,3 @@ Admins can `tail -f` this for live visibility. No prompt content is logged.
 
 v1 = phases 1+2+3 plus the daemon client mode (~750 LOC total).
 
-## License
-
-MIT.
