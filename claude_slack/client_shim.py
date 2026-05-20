@@ -245,12 +245,52 @@ class ClientShim(Shim):
                     await self._http.close()
 
 
+def _bootstrap_config():
+    """Resolve router URL + api_key. URL can come from env var or config; key is
+    interactively prompted on first launch when missing."""
+    from .config import load, save
+
+    cfg = load()
+    env_url = os.environ.get("CLAUDE_SLACK_ROUTER_URL", "").strip()
+    if env_url and not cfg.router.url:
+        cfg.router.url = env_url
+
+    if not cfg.router.url:
+        sys.stderr.write(
+            "claude-slack mirror: router URL not set.\n"
+            "  Either: set CLAUDE_SLACK_ROUTER_URL=wss://router.example.com/v1/connect\n"
+            "  Or:     run `claude-slack init --client`\n"
+        )
+        return None
+
+    if not cfg.router.api_key:
+        print()
+        print("\033[1mFirst-time setup\033[0m")
+        print(f"  Router: \033[36m{cfg.router.url}\033[0m")
+        print()
+        print("  In Slack, DM @claude or type:  \033[1m/claude register\033[0m")
+        print("  The bot will DM you your API key (one-time).")
+        print()
+        try:
+            key = input("  Paste API key (cs_…): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            sys.stderr.write("\nAborted.\n")
+            return None
+        if not key.startswith("cs_"):
+            sys.stderr.write("That doesn't look like an API key (should start with cs_). Aborting.\n")
+            return None
+        cfg.router.api_key = key
+        save(cfg)
+        print(f"\033[32m  Saved to ~/.config/claude-slack/config.toml. Connecting…\033[0m")
+        print()
+
+    return cfg
+
+
 def run(argv: list[str]) -> int:
     logging.basicConfig(level=logging.WARNING)
-    from .config import load
-    cfg = load()
-    if not cfg.router.url or not cfg.router.api_key:
-        sys.stderr.write("claude-slack mirror: no router config. Run: claude-slack init --client\n")
+    cfg = _bootstrap_config()
+    if cfg is None:
         return 1
     sh = ClientShim(cfg, argv)
     try:

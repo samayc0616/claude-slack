@@ -20,14 +20,29 @@ def cmd_run(_args) -> int:
 
 
 def cmd_mirror(args) -> int:
-    # Auto-select transport: if config has [router] block, use client shim; else direct.
+    """Auto-select transport.
+    - If CLAUDE_SLACK_ROUTER_URL is set OR config has [router].url → router client mode
+      (will interactively prompt for api_key if missing)
+    - Else if direct Slack tokens are in config → direct mode
+    - Else: error with onboarding hint
+    """
+    import os
     from .config import load
     cfg = load()
-    if cfg.router.url and cfg.router.api_key:
+    has_router = cfg.router.url or os.environ.get("CLAUDE_SLACK_ROUTER_URL", "").strip()
+    if has_router:
         from . import client_shim
         return client_shim.run(args.claude_args or [])
-    from . import shim
-    return shim.run(args.claude_args or [])
+    if cfg.slack.bot_token and cfg.slack.app_token:
+        from . import shim
+        return shim.run(args.claude_args or [])
+    import sys as _s
+    _s.stderr.write(
+        "claude-slack mirror: not configured.\n"
+        "  Team (router) mode: export CLAUDE_SLACK_ROUTER_URL=wss://... then re-run.\n"
+        "  Solo mode:          claude-slack init\n"
+    )
+    return 1
 
 
 def cmd_list(_args) -> int:

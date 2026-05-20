@@ -36,13 +36,19 @@ def _manifest(display_name: str = "claude") -> dict:
                 "messages_tab_read_only_enabled": False,
             },
             "bot_user": {"display_name": display_name, "always_online": True},
-            "slash_commands": [],
+            "slash_commands": [{
+                "command": "/claude",
+                "description": "Register your local shim with the router",
+                "usage_hint": "register | revoke | status",
+                "should_escape": False,
+            }],
         },
         "oauth_config": {
             "scopes": {
                 "bot": [
                     "app_mentions:read",
                     "chat:write",
+                    "commands",
                     "files:read",
                     "files:write",
                     "im:history",

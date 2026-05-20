@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any
 
 from aiohttp import WSMsgType, web
@@ -56,6 +57,7 @@ class Router:
         self.slack.event("message")(self.on_slack_message)
         self.slack.event("app_mention")(self.on_slack_app_mention)
         self.slack.event("reaction_added")(self.on_slack_reaction)
+        self.slack.command("/claude")(self.on_slack_command)
 
     async def on_slack_message(self, event: dict) -> None:
         # Only DMs carry session content under the strict-isolation model.
@@ -80,6 +82,89 @@ class Router:
         if not user_id or self.users.get(user_id) is None:
             return
         await self._deliver(user_id, event)
+
+    async def on_slack_command(self, ack, body, respond) -> None:
+        """/claude register | revoke | status. Self-serve API key issuance."""
+        await ack()
+        user_id = body.get("user_id", "")
+        user_name = body.get("user_name", "") or user_id
+        text = (body.get("text") or "").strip().lower()
+        sub = (text.split() or ["register"])[0]
+
+        if sub == "register":
+            await self._cmd_register(user_id, user_name, respond)
+        elif sub == "revoke":
+            await self._cmd_revoke(user_id, respond)
+        elif sub == "status":
+            await self._cmd_status(user_id, respond)
+        else:
+            await respond(text=":grey_question: Usage: `/claude register` | `/claude revoke` | `/claude status`")
+
+    async def _cmd_register(self, user_id: str, user_name: str, respond) -> None:
+        existed = self.users.get(user_id) is not None
+        # Close any existing live connection so the old key can't be used after rotation.
+        if existed:
+            existing = self._shims.get(user_id)
+            if existing is not None:
+                try:
+                    await existing.ws.close()
+                except Exception:
+                    pass
+        key = self.users.add(user_id, user_name)
+        self.audit.write("register", user=user_id, name=user_name, rotated=existed)
+
+        url = self.cfg.server.public_url or f"ws://<router-host>:{self.cfg.server.port}/v1/connect"
+        snippet = (
+            ":key: *Your claude-slack API key*  "
+            f"({'rotated — old key no longer works' if existed else 'new'})\n\n"
+            "Paste this into `~/.config/claude-slack/config.toml`:\n"
+            "```\n"
+            "[router]\n"
+            f"url = \"{url}\"\n"
+            f"api_key = \"{key}\"\n"
+            "```\n"
+            ":warning: This is the only time you'll see this key. "
+            "If you lose it, run `/claude register` again to rotate.\n\n"
+            "Or, when `claude-slack mirror` prompts you, paste just the api_key value: "
+            f"`{key}`"
+        )
+        try:
+            dm = await self.web.conversations_open(users=user_id)
+            ch = (dm.get("channel") or {}).get("id", "")
+            if ch:
+                await self.web.chat_postMessage(channel=ch, text=snippet)
+                await respond(text=":mailbox_with_mail: I just DM'd you your API key.")
+                return
+        except Exception as e:
+            log.warning("DM failed for %s: %s", user_id, e)
+        # Fallback: ephemeral reply with the key (less private but recoverable).
+        await respond(text=f"I couldn't DM you. Here's your key (ephemeral):\n{snippet}")
+
+    async def _cmd_revoke(self, user_id: str, respond) -> None:
+        if not self.users.revoke(user_id):
+            await respond(text=":grey_question: No key on file for you. Nothing to revoke.")
+            return
+        existing = self._shims.get(user_id)
+        if existing is not None:
+            try:
+                await existing.ws.close()
+            except Exception:
+                pass
+        self.audit.write("revoke", user=user_id)
+        await respond(text=":no_entry: revoked. Your mirror sessions are disconnected. "
+                            "Run `/claude register` to get a new key.")
+
+    async def _cmd_status(self, user_id: str, respond) -> None:
+        entry = self.users.get(user_id)
+        if entry is None:
+            await respond(text=":grey_question: No key on file. Run `/claude register`.")
+            return
+        connected = user_id in self._shims
+        age_days = (time.time() - entry.created_at) / 86400 if hasattr(entry, "created_at") else 0
+        await respond(text=(
+            f"*status*  registered: yes  ·  shim connected: {connected}  ·  "
+            f"key age: {age_days:.1f}d  ·  queued events: {self.queue.depth(user_id)}"
+        ))
 
     # ---------- routing ----------
 
